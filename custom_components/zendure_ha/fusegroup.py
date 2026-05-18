@@ -38,7 +38,7 @@ class FuseGroup:
                 avail = max(self.minpower, limit)
                 for fd in self.devices:
                     if fd.homeInput.asInt > 0:
-                        fd.pwr_max = int(avail * ((100 - fd.electricLevel.asInt) * fd.charge_limit) / weight) if weight < 0 else fd.charge_start
+                        fd.pwr_max = int(avail * ((100 - fd.electricLevel.asInt) * fd.charge_limit) / weight) if weight > 0 else fd.charge_start
                         limit -= fd.charge_limit
                         if limit > avail - fd.pwr_max:
                             fd.pwr_max = max(avail - limit, avail)
