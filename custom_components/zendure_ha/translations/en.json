@@ -421,7 +421,8 @@
           "smart": "Smart Matching",
           "smart_discharging": "Smart discharge only",
           "smart_charging": "Smart charge only",
-          "store_solar": "Store Solar"
+          "store_solar": "Store Solar",
+          "monitor": "Monitor only (no commands)"
         }
       },
       "pass_mode": {

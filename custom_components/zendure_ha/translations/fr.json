@@ -382,7 +382,8 @@
           "smart": "Couplage intelligent",
           "smart_discharging": "Décharge intelligente",
           "smart_charging": "Charge intelligente",
-          "store_solar": "Stocker le solaire"
+          "store_solar": "Stocker le solaire",
+          "monitor": "Surveillance uniquement (aucune commande)"
         }
       },
       "pass_mode": {
