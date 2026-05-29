@@ -588,17 +588,25 @@ class ZendureDevice(EntityDevice):
 
             # On error, also push a Telegram notification so the user knows
             # immediately without having to open the HA UI. Uses the
-            # telegram_bot.send_message service with the user's bot config.
-            if had_error and self.hass.services.has_service("telegram_bot", "send_message"):
+            # telegram_bot.send_message service with the bot config stored
+            # in the integration options (skipped if not configured).
+            from .api import Api  # local import to avoid circular at module load
+
+            if (
+                had_error
+                and Api.telegram_config_entry_id
+                and Api.telegram_entity_id
+                and self.hass.services.has_service("telegram_bot", "send_message")
+            ):
                 try:
                     await self.hass.services.async_call(
                         "telegram_bot",
                         "send_message",
                         {
-                            "config_entry_id": "01KGFHS1READGFH3KXM5W6NWE3",
+                            "config_entry_id": Api.telegram_config_entry_id,
                             "title": "Zendure - Reset connection failed",
                             "message": msg,
-                            "entity_id": ["notify.domdom_habot_bob_8585594019"],
+                            "entity_id": [Api.telegram_entity_id],
                         },
                         blocking=False,
                     )

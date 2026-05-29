@@ -52,7 +52,9 @@
       "init": {
         "data": {
           "scan_interval": "Scaninterval (seconden)",
-          "auto_mqtt_user": "MQTT-gebruikers automatisch beheren"
+          "auto_mqtt_user": "MQTT-gebruikers automatisch beheren",
+          "telegram_config_entry_id": "Telegram-bot configuratie-ID (voor foutmeldingen)",
+          "telegram_entity_id": "Telegram-notifier entiteit (bijv. notify.mijn_bot)"
         },
         "description": "Pas je opties aan.",
         "title": "Zendure Integratie Opties"

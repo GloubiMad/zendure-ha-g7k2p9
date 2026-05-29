@@ -40,7 +40,9 @@
         "data": {
           "p1meter": "P1 Sensor für Smart Matching",
           "mqttlog": "MQTT-Kommunikation loggen",
-          "auto_mqtt_user": "MQTT-Benutzer automatisch verwalten"
+          "auto_mqtt_user": "MQTT-Benutzer automatisch verwalten",
+          "telegram_config_entry_id": "Telegram-Bot Konfigurationseintrag-ID (für Fehlermeldungen)",
+          "telegram_entity_id": "Telegram-Notifier-Entität (z. B. notify.mein_bot)"
         },
         "description": "Optionen anpassen",
         "title": "Zendure Integrationsoptionen"

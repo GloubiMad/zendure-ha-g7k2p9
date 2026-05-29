@@ -51,7 +51,9 @@
         "data": {
           "p1meter": "P1 Sensor for smart matching",
           "mqttlog": "Log MQTT communication",
-          "auto_mqtt_user": "Automatically manage MQTT users"
+          "auto_mqtt_user": "Automatically manage MQTT users",
+          "telegram_config_entry_id": "Telegram bot config entry ID (for error alerts)",
+          "telegram_entity_id": "Telegram notifier entity ID (e.g. notify.my_bot)"
         },
         "description": "Amend your options.",
         "title": "Zendure Integration Options"
