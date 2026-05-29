@@ -578,12 +578,27 @@ class ZendureDevice(EntityDevice):
             return False
 
         finally:
-            if msg is not None:
+            had_error = msg is not None
+            if had_error:
                 msg = f"Error setting the MQTT server on {self.name} to {mqtt.host}, {msg}"
             else:
                 msg = f"Changing the MQTT server on {self.name} to {mqtt.host} was successful"
 
             persistent_notification.async_create(self.hass, (msg), "Zendure", "zendure_ha")
+
+            # On error, also push a Telegram notification so the user knows
+            # immediately without having to open the HA UI. Uses the
+            # notify.telegram service (configure your bot under that name).
+            if had_error and self.hass.services.has_service("notify", "telegram"):
+                try:
+                    await self.hass.services.async_call(
+                        "notify",
+                        "telegram",
+                        {"title": "Zendure - Reset connection failed", "message": msg},
+                        blocking=False,
+                    )
+                except Exception as err:  # pylint: disable=broad-except
+                    _LOGGER.warning("Could not send Telegram notification: %s", err)
 
             _LOGGER.info("BLE update ready")
 
