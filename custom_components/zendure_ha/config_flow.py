@@ -23,6 +23,8 @@ from .const import (
     CONF_MQTTUSER,
     CONF_P1METER,
     CONF_SIM,
+    CONF_TELEGRAM_CONFIG_ENTRY_ID,
+    CONF_TELEGRAM_ENTITY_ID,
     CONF_WIFIPSW,
     CONF_WIFISSID,
     DOMAIN,
@@ -165,6 +167,8 @@ class ZendureOptionsFlowHandler(OptionsFlow):
                 vol.Required(CONF_MQTTLOG, default=self.config_entry.data[CONF_MQTTLOG]): bool,
                 vol.Optional(CONF_AUTO_MQTT_USER, default=self.config_entry.data.get(CONF_AUTO_MQTT_USER, False)): bool,
                 vol.Optional(CONF_SIM, default=self.config_entry.data.get(CONF_SIM, False)): bool,
+                vol.Optional(CONF_TELEGRAM_CONFIG_ENTRY_ID, default=self.config_entry.data.get(CONF_TELEGRAM_CONFIG_ENTRY_ID, "")): str,
+                vol.Optional(CONF_TELEGRAM_ENTITY_ID, default=self.config_entry.data.get(CONF_TELEGRAM_ENTITY_ID, "")): str,
             }
         )
 
