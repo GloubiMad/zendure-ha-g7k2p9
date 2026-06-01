@@ -9,6 +9,7 @@ from homeassistant.helpers import device_registry as dr
 from .api import Api
 from .const import CONF_MQTTLOG, CONF_P1METER, CONF_SIM
 from .device import ZendureDevice
+from .entity import EntityDevice
 from .manager import ZendureConfigEntry, ZendureManager
 from .migration import Migration
 
@@ -29,6 +30,14 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ZendureConfigEntry) ->
 async def async_setup_entry(hass: HomeAssistant, entry: ZendureConfigEntry) -> bool:
     """Set up Zendure as config entry."""
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    # Preload the translation-key -> platform mapping on the executor.
+    # EntityDevice.check_entities() needs it, and reading the file inside
+    # the event loop triggers HA's blocking-call detector. We load it once
+    # per HA session before any EntityDevice is instantiated.
+    if EntityDevice.checkEntity is None:
+        EntityDevice.checkEntity = await hass.async_add_executor_job(EntityDevice._load_check_entity_map)
+
     manager = ZendureManager(hass, entry)
     await manager.loadDevices()
     entry.runtime_data = manager
