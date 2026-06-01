@@ -328,6 +328,14 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         if Api.localServer:
             _check(Api.mqttLocal, "local")
 
+        # Per-device cloud relay clients (created on-demand when a legacy
+        # device sends via local MQTT, to mirror the message to the Zendure
+        # cloud broker with the device's own credentials). These die just
+        # as silently as the shared ones.
+        for device in Api.devices.values():
+            if device.zendure is not None:
+                _check(device.zendure, f"zendure[{device.name}]")
+
     def update_p1meter(self, p1meter: str | None) -> None:
         """Update the P1 meter sensor."""
         _LOGGER.debug("Updating P1 meter to: %s", p1meter)
