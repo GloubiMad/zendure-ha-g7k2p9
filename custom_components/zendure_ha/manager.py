@@ -90,26 +90,44 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.pwr_low = 0
 
     async def loadDevices(self) -> None:
-        if self.config_entry is None or (data := await Api.Connect(self.hass, dict(self.config_entry.data), True)) is None:
-            return
-        if (mqtt := data.get("mqtt")) is None:
-            return
-
-        # get version number from integration
+        # Stamp the manager device with the integration's version before
+        # creating its entities, so the device card shows the right version
+        # even on cold boot when the Zendure API is unreachable.
         integration = await async_get_integration(self.hass, DOMAIN)
-        if integration is None:
+        if integration is not None:
+            self.attr_device_info["sw_version"] = integration.manifest.get("version", "unknown")
+        else:
             _LOGGER.error("Integration not found for domain: %s", DOMAIN)
-            return
-        self.attr_device_info["sw_version"] = integration.manifest.get("version", "unknown")
 
-        self.operationmode = (
-            ZendureRestoreSelect(self, "Operation", {0: "off", 1: "manual", 2: "smart", 3: "smart_discharging", 4: "smart_charging", 5: "store_solar", 6: "monitor"}, self.update_operation),
+        # Always create the manager's own entities, BEFORE attempting any
+        # network I/O against the Zendure cloud API. Previously these were
+        # created after Api.Connect(), so a transient cloud outage at boot
+        # caused loadDevices() to return early and left Operation Mode +
+        # all manager sensors permanently marked "unavailable" until the
+        # next manual reload. Now they always come up; device entities
+        # still depend on a successful API call below.
+        self.operationmode = ZendureRestoreSelect(
+            self,
+            "Operation",
+            {0: "off", 1: "manual", 2: "smart", 3: "smart_discharging", 4: "smart_charging", 5: "store_solar", 6: "monitor"},
+            self.update_operation,
         )
         self.operationstate = ZendureSensor(self, "operation_state")
         self.manualpower = ZendureRestoreNumber(self, "manual_power", None, None, "W", "power", 12000, -12000, NumberMode.BOX, True)
         self.availableKwh = ZendureSensor(self, "available_kwh", None, "kWh", "energy_storage", None, 1)
         self.totalKwh = ZendureSensor(self, "total_kwh", None, "kWh", "energy_storage", "measurement", 2)
         self.power = ZendureSensor(self, "power", None, "W", "power", "measurement", 0)
+
+        if self.config_entry is None:
+            return
+        if (data := await Api.Connect(self.hass, dict(self.config_entry.data), True)) is None:
+            _LOGGER.warning(
+                "Zendure API unreachable at startup; manager entities remain available, "
+                "device entities will appear after the next successful refresh"
+            )
+            return
+        if (mqtt := data.get("mqtt")) is None:
+            return
 
         # load devices
         for dev in data["deviceList"]:
