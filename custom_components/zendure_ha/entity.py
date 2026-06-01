@@ -220,10 +220,27 @@ class EntityDevice:
         if parent is not None:
             self.attr_device_info["via_device"] = (DOMAIN, parent)
 
+    @staticmethod
+    def _load_check_entity_map() -> dict[str, str]:
+        """Read en.json and build the translation_key -> platform mapping.
+
+        Runs synchronously: callers MUST schedule this on the executor
+        (e.g. via hass.async_add_executor_job) when invoked from async
+        context. Home Assistant forbids file I/O inside the event loop.
+        """
+        _t = json.loads((Path(__file__).parent / "translations" / "en.json").read_text())
+        return {key: domain for domain, keys in _t.get("entity", {}).items() for key in keys}
+
     def check_entities(self, di: DeviceEntry, name: str) -> None:
         if EntityDevice.checkEntity is None:
-            _t = json.loads((Path(__file__).parent / "translations" / "en.json").read_text())
-            EntityDevice.checkEntity = {key: domain for domain, keys in _t.get("entity", {}).items() for key in keys}
+            # Fallback path: if the map was not preloaded by async_setup_entry
+            # we still load it here (synchronously) to keep the integration
+            # working, but this will trigger a HA blocking-call warning.
+            _LOGGER.warning(
+                "EntityDevice.checkEntity was not preloaded; falling back to "
+                "synchronous read inside the event loop"
+            )
+            EntityDevice.checkEntity = EntityDevice._load_check_entity_map()
 
         # Get all entities for this device and group them by translation_key if they match the current device and platform
         entity_registry = er.async_get(self.hass)
