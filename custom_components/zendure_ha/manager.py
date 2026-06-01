@@ -299,9 +299,34 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.update_count += 1
         self.totalKwh.update_value(kwh)
 
+        # MQTT watchdog: paho's loop_start() is supposed to auto-reconnect,
+        # but silent failures happen (broker drops the session, token rotates,
+        # network blip the reconnect logic gives up on...). If we detect a
+        # dropped connection here, force a reconnect on the executor so we
+        # never stay offline for more than one scan interval (60s).
+        await self.hass.async_add_executor_job(self._check_mqtt_health)
+
         # Manually update the timer
         if self.hass and self.hass.loop.is_running():
             self._schedule_refresh()
+
+    def _check_mqtt_health(self) -> None:
+        """Verify both MQTT clients are still connected; reconnect if not."""
+
+        def _check(client: Any, label: str) -> None:
+            if client is None:
+                return
+            try:
+                if client.is_connected():
+                    return
+                _LOGGER.warning("MQTT %s client disconnected, forcing reconnect", label)
+                client.reconnect()
+            except Exception as err:  # pylint: disable=broad-except
+                _LOGGER.error("MQTT %s reconnect failed: %s", label, err)
+
+        _check(Api.mqttCloud, "cloud")
+        if Api.localServer:
+            _check(Api.mqttLocal, "local")
 
     def update_p1meter(self, p1meter: str | None) -> None:
         """Update the P1 meter sensor."""
