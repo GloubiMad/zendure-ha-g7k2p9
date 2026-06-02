@@ -247,15 +247,26 @@ class Api:
                 try:
                     payload = json.loads(msg.payload.decode())
                 except json.JSONDecodeError as err:
-                    _LOGGER.error("Failed to decode JSON from device %s on subtopic '%s': %s", device.name, topics[3], err)
+                    # Valid UTF-8 text but not valid JSON (empty-ish payload,
+                    # lone null byte, retained blank message, keepalive...).
+                    # Log length + hex preview to identify the exact content.
+                    _LOGGER.error(
+                        "Failed to decode JSON from device %s on subtopic '%s' (len=%d, first bytes: %s): %s",
+                        device.name,
+                        topics[3],
+                        len(msg.payload),
+                        msg.payload[:16].hex(" "),
+                        err,
+                    )
                     return
                 except UnicodeDecodeError as err:
                     # Binary (non-UTF-8) payload, e.g. proprietary log/OTA frames.
                     # Log the subtopic and a hex preview to identify the channel.
                     _LOGGER.error(
-                        "Failed to decode payload encoding from device %s on subtopic '%s' (first bytes: %s): %s",
+                        "Failed to decode payload encoding from device %s on subtopic '%s' (len=%d, first bytes: %s): %s",
                         device.name,
                         topics[3],
+                        len(msg.payload),
                         msg.payload[:16].hex(" "),
                         err,
                     )
@@ -291,15 +302,26 @@ class Api:
                 try:
                     payload = json.loads(msg.payload.decode())
                 except json.JSONDecodeError as err:
-                    _LOGGER.error("Failed to decode JSON from local device %s on subtopic '%s': %s", device.name, topics[3], err)
+                    # Valid UTF-8 text but not valid JSON (empty-ish payload,
+                    # lone null byte, retained blank message, keepalive...).
+                    # Log length + hex preview to identify the exact content.
+                    _LOGGER.error(
+                        "Failed to decode JSON from local device %s on subtopic '%s' (len=%d, first bytes: %s): %s",
+                        device.name,
+                        topics[3],
+                        len(msg.payload),
+                        msg.payload[:16].hex(" "),
+                        err,
+                    )
                     return
                 except UnicodeDecodeError as err:
                     # Binary (non-UTF-8) payload, e.g. proprietary log/OTA frames.
                     # Log the subtopic and a hex preview to identify the channel.
                     _LOGGER.error(
-                        "Failed to decode local payload encoding from device %s on subtopic '%s' (first bytes: %s): %s",
+                        "Failed to decode local payload encoding from device %s on subtopic '%s' (len=%d, first bytes: %s): %s",
                         device.name,
                         topics[3],
+                        len(msg.payload),
                         msg.payload[:16].hex(" "),
                         err,
                     )
