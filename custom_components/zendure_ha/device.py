@@ -190,6 +190,14 @@ class ZendureDevice(EntityDevice):
         except Exception:
             _LOGGER.error("SetLimits error %s %s %s!", self.name, charge, discharge)
 
+    def batteryUpdate(self, batteries: list[ZendureBattery]) -> None:
+        """Adjust device limits when the battery set changes.
+
+        No-op on the base device; Hub1200/Hub2000 override this to widen the
+        input-limit range according to the detected pack count/capacity. The
+        caller guarantees a non-empty list.
+        """
+
     def setStatus(self) -> None:
         from .api import Api
 
@@ -240,7 +248,11 @@ class ZendureDevice(EntityDevice):
                     case "outputHomePower":
                         self.aggrHomeOut.aggregate(dt_util.now(), value)
                     case "gridOffPower":
-                        self.aggrOffGrid.aggregate(dt_util.now(), value)
+                        # aggrOffGrid only exists on off-grid-capable devices
+                        # (SF800 Pro, SF1600, SF2400...). Guard so a stray
+                        # gridOffPower on another model does not raise.
+                        if (aggr := getattr(self, "aggrOffGrid", None)) is not None:
+                            aggr.aggregate(dt_util.now(), value)
                     case "inverseMaxPower":
                         self.setLimits(self.charge_limit, value)
                     case "chargeLimit" | "chargeMaxLimit":
@@ -329,12 +341,14 @@ class ZendureDevice(EntityDevice):
 
         # update the battery properties
         if batprops := payload.get("packData", None):
+            new_battery = False
             for b in batprops:
                 if (sn := b.get("sn", None)) is None:
                     continue
 
                 if (bat := self.batteries.get(sn, None)) is None:
                     self.batteries[sn] = ZendureBattery(self.hass, sn, self)
+                    new_battery = True
 
                 elif bat and b:
                     for key, value in b.items():
@@ -346,6 +360,11 @@ class ZendureDevice(EntityDevice):
             self.kWh = sum(0 if b is None else b.kWh for b in self.batteries.values())
             self.totalKwh.update_value(self.kWh)
             self.availableKwh.update_value((self.electricLevel.asNumber - self.minSoc.asNumber) / 100 * self.kWh)
+
+            # When the battery set changes, let the device adjust its limits
+            # (Hub1200/Hub2000 widen the input-limit range for larger packs).
+            if new_battery and (bats := [x for x in self.batteries.values() if x is not None]):
+                self.batteryUpdate(bats)
 
     def mqttMessage(self, topic: str, payload: Any) -> bool:
         try:
