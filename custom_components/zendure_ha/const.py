@@ -74,3 +74,11 @@ class SmartMode:
 
     POWER_START = 60  # Minimum Power (W) for starting a device
     POWER_TOLERANCE = 5  # Device-level power tolerance (W) before updating
+
+    # MQTT staleness watchdog: a client can report is_connected()==True while
+    # the broker has silently dropped a device's subscription, so no data
+    # reaches HA. MQTT_STALE_TIMEOUT is how long a device may stay silent
+    # (slightly above the 5-min message freshness window) before we re-subscribe
+    # its topics; MQTT_RESUB_COOLDOWN throttles repeated re-subscriptions.
+    MQTT_STALE_TIMEOUT = 360  # seconds of silence before re-subscribing a device
+    MQTT_RESUB_COOLDOWN = 300  # minimum seconds between re-subscriptions per device
