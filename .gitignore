@@ -27,3 +27,11 @@ config/*
 # Home Assistant configuration
 custom_components/*
 !custom_components/zendure_ha
+
+
+# local snapshots / backups (versioned copies kept outside git)
+/zendure/
+/zendure_before/
+
+# temporary commit-message file
+/msg.txt
