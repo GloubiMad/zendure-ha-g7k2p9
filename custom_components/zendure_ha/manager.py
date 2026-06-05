@@ -386,8 +386,14 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         offset = timedelta(seconds=SmartMode.MQTT_LASTSEEN_OFFSET)
 
         # Compute silence per device from the real last-message time.
+        # Only consider devices actually using MQTT (device.mqtt set). ZenSdk
+        # devices in zenSDK mode poll over HTTP and keep device.mqtt is None;
+        # re-subscribing/reconnecting MQTT could not help them and a cloud
+        # reconnect would be pointless, so they are excluded here.
         silence: dict[str, float] = {}
         for device in self.devices:
+            if device.mqtt is None:
+                continue
             if device.lastseen != datetime.min:
                 # lastseen == real message time + offset -> recover it exactly
                 self._last_msg[device.deviceId] = device.lastseen - offset
