@@ -70,7 +70,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.update_count = 0
 
         # MQTT staleness watchdog bookkeeping (keyed by deviceId)
-        self._last_fresh: dict[str, datetime] = {}  # last tick a device had fresh data
+        self._last_msg: dict[str, datetime] = {}  # real wall-clock time of last message
         self._resubscribe_after: dict[str, datetime] = {}  # cooldown gate per device
 
         self.charge: list[ZendureDevice] = []
@@ -366,52 +366,72 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         A broker can keep the TCP session alive (is_connected()==True, so the
         reconnect checks above never fire) while silently no longer delivering
         a device's topic. The result: the Zendure app still shows data (device
-        keeps publishing) but HA receives nothing. We detect a device that has
-        gone silent past MQTT_STALE_TIMEOUT and re-subscribe its topics to
-        re-arm delivery, without disturbing healthy devices.
+        keeps publishing) but HA receives nothing.
 
-        device.lastseen is set to now+5min on every message but is reset to
-        datetime.min by power_get() once it expires, which would erase the
-        'was recently active' signal. So instead of trusting lastseen alone,
-        we sample freshness every tick and remember, per device, the last tick
-        it was fresh.
+        Zendure devices report every ~1s (day) and at worst every ~60s
+        (coordinator poll), so silence past MQTT_STALE_TIMEOUT (150s) is
+        clearly abnormal. We recover the *real* last-message time from
+        lastseen (which is stamped at message_time + MQTT_LASTSEEN_OFFSET) so
+        detection is not blinded by that 5-min future offset, and we cache it
+        because power_get() resets lastseen to datetime.min on expiry.
+
+        Two graduated actions, throttled per device by MQTT_RESUB_COOLDOWN:
+        - re-subscribe the silent device's topics (light, idempotent); covers
+          a per-device subscription drop without disturbing healthy devices;
+        - if the WHOLE client is silent (no device fresh) past
+          MQTT_RECONNECT_TIMEOUT, the socket is likely half-open: force one
+          reconnect of that client.
         """
         now = datetime.now()
+        offset = timedelta(seconds=SmartMode.MQTT_LASTSEEN_OFFSET)
+
+        # Compute silence per device from the real last-message time.
+        silence: dict[str, float] = {}
         for device in self.devices:
-            devid = device.deviceId
+            if device.lastseen != datetime.min:
+                # lastseen == real message time + offset -> recover it exactly
+                self._last_msg[device.deviceId] = device.lastseen - offset
+            if (msg_time := self._last_msg.get(device.deviceId)) is not None:
+                silence[device.deviceId] = (now - msg_time).total_seconds()
 
-            # Currently fresh: a message arrived within the last 5 minutes.
-            if device.lastseen > now:
-                self._last_fresh[devid] = now
+        if not silence:
+            return
+
+        # If any device is delivering, the client is healthy -> never reconnect
+        # (an isolated silent device is then a device-side problem, not a socket
+        # one), only re-subscribe it.
+        any_fresh = any(s < SmartMode.MQTT_STALE_TIMEOUT for s in silence.values())
+        reconnected: set[int] = set()
+
+        for device in self.devices:
+            if (silent := silence.get(device.deviceId)) is None or silent < SmartMode.MQTT_STALE_TIMEOUT:
                 continue
-
-            # Seed on first observation (e.g. just after boot, before the
-            # first message) so we don't re-subscribe prematurely.
-            last = self._last_fresh.get(devid)
-            if last is None:
-                self._last_fresh[devid] = now
+            if (until := self._resubscribe_after.get(device.deviceId)) is not None and now < until:
                 continue
-
-            silent = (now - last).total_seconds()
-            if silent < SmartMode.MQTT_STALE_TIMEOUT:
-                continue
-
-            # Throttle: re-subscribe at most once per MQTT_RESUB_COOLDOWN.
-            if (until := self._resubscribe_after.get(devid)) is not None and now < until:
-                continue
-
             client = device.mqtt or Api.mqttCloud
+            if client is None or not client.is_connected():
+                continue  # disconnected clients are handled by the reconnect pass above
+
             try:
-                if client is not None and client.is_connected():
+                if not any_fresh and silent >= SmartMode.MQTT_RECONNECT_TIMEOUT:
+                    if id(client) not in reconnected:
+                        _LOGGER.warning(
+                            "MQTT delivering no data (device %s silent %ds); forcing reconnect",
+                            device.name,
+                            int(silent),
+                        )
+                        client.reconnect()
+                        reconnected.add(id(client))
+                else:
                     _LOGGER.warning(
-                        "Device %s silent for %ds while MQTT is connected; re-subscribing topics",
+                        "Device %s silent %ds while MQTT is connected; re-subscribing topics",
                         device.name,
                         int(silent),
                     )
                     Api.subscribeDevice(client, device)
-                    self._resubscribe_after[devid] = now + timedelta(seconds=SmartMode.MQTT_RESUB_COOLDOWN)
+                self._resubscribe_after[device.deviceId] = now + timedelta(seconds=SmartMode.MQTT_RESUB_COOLDOWN)
             except Exception as err:  # pylint: disable=broad-except
-                _LOGGER.error("Re-subscribe for %s failed: %s", device.name, err)
+                _LOGGER.error("MQTT staleness recovery for %s failed: %s", device.name, err)
 
     def update_p1meter(self, p1meter: str | None) -> None:
         """Update the P1 meter sensor."""

@@ -315,11 +315,13 @@ class ZendureDevice(EntityDevice):
         self.mqttPublish(self.topic_function, command)
 
     async def mqttProperties(self, payload: Any) -> None:
-        if self.lastseen == datetime.min:
-            self.lastseen = datetime.now() + timedelta(minutes=5)
+        # lastseen is stamped in the future (now + offset); the real message
+        # time is lastseen - offset. Kept as a shared constant so the manager
+        # staleness watchdog can recover it accurately.
+        first_seen = self.lastseen == datetime.min
+        self.lastseen = datetime.now() + timedelta(seconds=SmartMode.MQTT_LASTSEEN_OFFSET)
+        if first_seen:
             self.setStatus()
-        else:
-            self.lastseen = datetime.now() + timedelta(minutes=5)
 
         if (properties := payload.get("properties", None)) and len(properties) > 0:
             for key, value in properties.items():
