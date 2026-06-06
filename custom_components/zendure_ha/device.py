@@ -627,7 +627,9 @@ class ZendureDevice(EntityDevice):
                             # addresses, URLs and dashes that MarkdownV2 (the
                             # bot's default parse mode) would reject with
                             # "character '-' is reserved and must be escaped".
-                            "parse_mode": "none",
+                            # telegram_bot accepts: html, markdown, markdownv2,
+                            # plain_text -> plain_text disables all parsing.
+                            "parse_mode": "plain_text",
                         },
                         blocking=False,
                     )

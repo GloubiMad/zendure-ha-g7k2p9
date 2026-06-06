@@ -168,7 +168,7 @@ class ZendureOptionsFlowHandler(OptionsFlow):
                     "title": "Zendure",
                     "message": "Zendure test notification - your Telegram settings are correct.",
                     "entity_id": [entity_id],
-                    "parse_mode": "none",
+                    "parse_mode": "plain_text",
                 },
                 blocking=True,
             )
