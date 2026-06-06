@@ -617,6 +617,11 @@ class ZendureDevice(EntityDevice):
                             "title": "Zendure - Reset connection failed",
                             "message": msg,
                             "entity_id": [Api.telegram_entity_id],
+                            # Force plain text: the message contains MAC
+                            # addresses, URLs and dashes that MarkdownV2 (the
+                            # bot's default parse mode) would reject with
+                            # "character '-' is reserved and must be escaped".
+                            "parse_mode": "none",
                         },
                         blocking=False,
                     )
