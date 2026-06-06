@@ -41,6 +41,15 @@ CONST_TIMEOUT = ClientTimeout(total=4)
 SF_COMMAND_CHAR = "0000c304-0000-1000-8000-00805f9b34fb"
 
 
+def _log_threadsafe_exception(future: Any) -> None:
+    """Log exceptions raised by coroutines scheduled via run_coroutine_threadsafe."""
+    try:
+        if (exc := future.exception()) is not None:
+            _LOGGER.error("Threadsafe coroutine failed: %s", exc, exc_info=exc)
+    except Exception as err:  # pragma: no cover - defensive
+        _LOGGER.error("Could not retrieve threadsafe future exception: %s", err)
+
+
 class ZendureBattery(EntityDevice):
     """Zendure Battery class for devices."""
 
@@ -350,8 +359,8 @@ class ZendureDevice(EntityDevice):
         try:
             match topic:
                 case "properties/report":
-                    asyncio.run_coroutine_threadsafe(self.mqttProperties(payload), self.hass.loop)
-                    # self.mqttProperties(payload)
+                    future = asyncio.run_coroutine_threadsafe(self.mqttProperties(payload), self.hass.loop)
+                    future.add_done_callback(_log_threadsafe_exception)
 
                 case "register/replay":
                     _LOGGER.info("Register replay for %s => %s", self.name, payload)
