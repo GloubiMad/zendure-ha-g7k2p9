@@ -56,7 +56,9 @@
           "scan_interval": "Intervalle d'analyse (secondes)",
           "p1meter": "Capteur P1 pour le couplage intelligent",
           "mqttlog": "Journaliser communication MQTT",
-          "auto_mqtt_user": "Gérer automatiquement les utilisateurs MQTT"
+          "auto_mqtt_user": "Gérer automatiquement les utilisateurs MQTT",
+          "telegram_config_entry_id": "ID de l'entrée de configuration du bot Telegram (alertes)",
+          "telegram_entity_id": "Entité Telegram du notifieur (ex. notify.mon_bot)"
         },
         "description": "Modifiez vos options.",
         "title": "Options de l'intégration Zendure"

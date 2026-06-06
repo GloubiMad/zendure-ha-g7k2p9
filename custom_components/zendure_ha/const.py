@@ -18,6 +18,8 @@ CONF_MQTTPSW = "mqttpsw"
 CONF_WIFISSID = "wifissid"
 CONF_WIFIPSW = "wifipsw"
 CONF_AUTO_MQTT_USER = "auto_mqtt_user"
+CONF_TELEGRAM_CONFIG_ENTRY_ID = "telegram_config_entry_id"
+CONF_TELEGRAM_ENTITY_ID = "telegram_entity_id"
 
 CONF_HAKEY = "C*dafwArEOXK"
 
