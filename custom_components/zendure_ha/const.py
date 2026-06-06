@@ -75,10 +75,18 @@ class SmartMode:
     POWER_START = 50  # Minimum Power (W) for starting a device
     POWER_TOLERANCE = 5  # Device-level power tolerance (W) before updating
 
+    # On every MQTT message a device's lastseen is stamped at now + this many
+    # seconds; once wall-clock passes it the device is treated as offline.
+    # The real time of the last message is therefore lastseen - this offset.
+    MQTT_LASTSEEN_OFFSET = 300  # 5 min liveness window (shared device/manager)
+
     # MQTT staleness watchdog: a client can report is_connected()==True while
     # the broker has silently dropped a device's subscription, so no data
-    # reaches HA. MQTT_STALE_TIMEOUT is how long a device may stay silent
-    # (slightly above the 5-min message freshness window) before we re-subscribe
-    # its topics; MQTT_RESUB_COOLDOWN throttles repeated re-subscriptions.
-    MQTT_STALE_TIMEOUT = 360  # seconds of silence before re-subscribing a device
-    MQTT_RESUB_COOLDOWN = 300  # minimum seconds between re-subscriptions per device
+    # reaches HA. Zendure devices normally report every ~1s (day) and at worst
+    # every ~60s (coordinator poll), so 150s of silence is already clearly
+    # abnormal. We then re-subscribe the device's topics; if the WHOLE client
+    # delivers nothing past MQTT_RECONNECT_TIMEOUT the socket is likely
+    # half-open and we force a reconnect.
+    MQTT_STALE_TIMEOUT = 150  # seconds of silence before re-subscribing a device
+    MQTT_RECONNECT_TIMEOUT = 420  # total-blackout silence before forcing a reconnect
+    MQTT_RESUB_COOLDOWN = 120  # minimum seconds between recovery actions per device
