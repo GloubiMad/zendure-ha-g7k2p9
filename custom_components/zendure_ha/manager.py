@@ -103,7 +103,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.attr_device_info["sw_version"] = integration.manifest.get("version", "unknown")
 
         self.operationmode = (
-            ZendureRestoreSelect(self, "Operation", {0: "off", 1: "manual", 2: "smart", 3: "smart_discharging", 4: "smart_charging", 5: "store_solar"}, self.update_operation),
+            ZendureRestoreSelect(self, "Operation", {0: "off", 1: "manual", 2: "smart", 3: "smart_discharging", 4: "smart_charging", 5: "store_solar", 6: "monitor"}, self.update_operation),
         )
         self.operationstate = ZendureSensor(self, "operation_state")
         self.manualpower = ZendureRestoreNumber(self, "manual_power", None, None, "W", "power", 12000, -12000, NumberMode.BOX, True)
@@ -498,6 +498,10 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     await self.power_discharge(setpoint)
                 else:
                     await self.power_charge(setpoint, time)
+
+            case ManagerMode.MONITOR:
+                # Passthrough: display MQTT data from Zendure as-is, send no commands
+                self.operationstate.update_value(ManagerState.IDLE.value)
 
             case ManagerMode.OFF:
                 self.operationstate.update_value(ManagerState.OFF.value)
