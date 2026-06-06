@@ -163,8 +163,8 @@ class ZendureOptionsFlowHandler(OptionsFlow):
 
         options_schema = vol.Schema(
             {
-                vol.Required(CONF_P1METER, default=self.config_entry.data[CONF_P1METER]): str,
-                vol.Required(CONF_MQTTLOG, default=self.config_entry.data[CONF_MQTTLOG]): bool,
+                vol.Required(CONF_P1METER, default=self.config_entry.data.get(CONF_P1METER, "sensor.power_actual")): str,
+                vol.Required(CONF_MQTTLOG, default=self.config_entry.data.get(CONF_MQTTLOG, False)): bool,
                 vol.Optional(CONF_AUTO_MQTT_USER, default=self.config_entry.data.get(CONF_AUTO_MQTT_USER, False)): bool,
                 vol.Optional(CONF_SIM, default=self.config_entry.data.get(CONF_SIM, False)): bool,
                 vol.Optional(CONF_TELEGRAM_CONFIG_ENTRY_ID, default=self.config_entry.data.get(CONF_TELEGRAM_CONFIG_ENTRY_ID, "")): str,

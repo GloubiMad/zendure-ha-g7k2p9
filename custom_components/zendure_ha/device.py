@@ -242,7 +242,11 @@ class ZendureDevice(EntityDevice):
                     case "outputHomePower":
                         self.aggrHomeOut.aggregate(dt_util.now(), value)
                     case "gridOffPower":
-                        self.aggrOffGrid.aggregate(dt_util.now(), value)
+                        # aggrOffGrid only exists on off-grid-capable devices
+                        # (SF800 Pro, SF1600, SF2400...). Guard so a stray
+                        # gridOffPower on another model does not raise.
+                        if (aggr := getattr(self, "aggrOffGrid", None)) is not None:
+                            aggr.aggregate(dt_util.now(), value)
                     case "inverseMaxPower":
                         self.setLimits(self.charge_limit, value)
                     case "chargeLimit" | "chargeMaxLimit":
