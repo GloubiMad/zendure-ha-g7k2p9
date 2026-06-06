@@ -495,7 +495,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
     async def _p1_changed(self, event: Event[EventStateChangedData]) -> None:
         # exit if there is nothing to do
-        if not self.hass.is_running or not self.hass.is_running or (new_state := event.data["new_state"]) is None:
+        if not self.hass.is_running or (new_state := event.data["new_state"]) is None:
             return
 
         try:  # convert the state to a float
