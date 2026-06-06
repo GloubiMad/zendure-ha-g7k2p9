@@ -249,14 +249,14 @@ class Api:
                 try:
                     payload = json.loads(msg.payload.decode())
                 except json.JSONDecodeError as err:
-                    _LOGGER.error("Failed to decode JSON from device %s on subtopic '%s': %s", deviceId, topics[3], err)
+                    _LOGGER.error("Failed to decode JSON from device %s on subtopic '%s': %s", device.name, topics[3], err)
                     return
                 except UnicodeDecodeError as err:
                     # Binary (non-UTF-8) payload, e.g. proprietary log/OTA frames.
                     # Log the subtopic and a hex preview to identify the channel.
                     _LOGGER.error(
                         "Failed to decode payload encoding from device %s on subtopic '%s' (first bytes: %s): %s",
-                        deviceId,
+                        device.name,
                         topics[3],
                         msg.payload[:16].hex(" "),
                         err,
@@ -293,14 +293,14 @@ class Api:
                 try:
                     payload = json.loads(msg.payload.decode())
                 except json.JSONDecodeError as err:
-                    _LOGGER.error("Failed to decode JSON from local device %s on subtopic '%s': %s", deviceId, topics[3], err)
+                    _LOGGER.error("Failed to decode JSON from local device %s on subtopic '%s': %s", device.name, topics[3], err)
                     return
                 except UnicodeDecodeError as err:
                     # Binary (non-UTF-8) payload, e.g. proprietary log/OTA frames.
                     # Log the subtopic and a hex preview to identify the channel.
                     _LOGGER.error(
                         "Failed to decode local payload encoding from device %s on subtopic '%s' (first bytes: %s): %s",
-                        deviceId,
+                        device.name,
                         topics[3],
                         msg.payload[:16].hex(" "),
                         err,
