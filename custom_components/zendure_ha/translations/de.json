@@ -35,6 +35,11 @@
     }
   },
   "options": {
+    "error": {
+      "telegram_test_failed": "Telegram-Test fehlgeschlagen: Konfigurationseintrag-ID und Notifier-Entität prüfen (Details im Home-Assistant-Log).",
+      "telegram_incomplete": "Für einen Test bitte Konfigurationseintrag-ID UND Notifier-Entität ausfüllen.",
+      "telegram_no_service": "Der Dienst telegram_bot.send_message ist nicht verfügbar. Ist die Telegram-Bot-Integration eingerichtet?"
+    },
     "step": {
       "init": {
         "data": {
@@ -42,7 +47,8 @@
           "mqttlog": "MQTT-Kommunikation loggen",
           "auto_mqtt_user": "MQTT-Benutzer automatisch verwalten",
           "telegram_config_entry_id": "Telegram-Bot Konfigurationseintrag-ID (für Fehlermeldungen)",
-          "telegram_entity_id": "Telegram-Notifier-Entität (z. B. notify.mein_bot)"
+          "telegram_entity_id": "Telegram-Notifier-Entität (z. B. notify.mein_bot)",
+          "telegram_test": "Test-Telegram-Nachricht senden, um die Einstellungen zu prüfen"
         },
         "description": "Optionen anpassen",
         "title": "Zendure Integrationsoptionen"

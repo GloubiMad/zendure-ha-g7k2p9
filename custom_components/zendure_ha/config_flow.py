@@ -25,6 +25,7 @@ from .const import (
     CONF_SIM,
     CONF_TELEGRAM_CONFIG_ENTRY_ID,
     CONF_TELEGRAM_ENTITY_ID,
+    CONF_TELEGRAM_TEST,
     CONF_WIFIPSW,
     CONF_WIFISSID,
     DOMAIN,
@@ -154,12 +155,50 @@ class ZendureConfigFlow(ConfigFlow, domain=DOMAIN):
 class ZendureOptionsFlowHandler(OptionsFlow):
     """Handles the options flow."""
 
+    async def _test_telegram(self, config_entry_id: str, entity_id: str) -> str | None:
+        """Send a test Telegram message. Returns None on success, else an error key."""
+        if not self.hass.services.has_service("telegram_bot", "send_message"):
+            return "telegram_no_service"
+        try:
+            await self.hass.services.async_call(
+                "telegram_bot",
+                "send_message",
+                {
+                    "config_entry_id": config_entry_id,
+                    "title": "Zendure",
+                    "message": "Zendure test notification - your Telegram settings are correct.",
+                    "entity_id": [entity_id],
+                    "parse_mode": "none",
+                },
+                blocking=True,
+            )
+        except Exception as err:  # pylint: disable=broad-except
+            _LOGGER.warning("Telegram test failed: %s", err)
+            return "telegram_test_failed"
+        return None
+
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Handle options flow."""
+        errors: dict[str, str] = {}
         if user_input is not None:
-            data = self.config_entry.data | user_input
-            self.hass.config_entries.async_update_entry(self.config_entry, data=data)
-            return self.async_create_entry(title="", data=data)
+            cfg = user_input.get(CONF_TELEGRAM_CONFIG_ENTRY_ID, "")
+            ent = user_input.get(CONF_TELEGRAM_ENTITY_ID, "")
+
+            # Optional verification: when the test box is ticked, actually send a
+            # message with the entered IDs so the user sees it arrive. If it
+            # fails, re-show the form with an error instead of saving blindly.
+            if user_input.get(CONF_TELEGRAM_TEST, False):
+                if not cfg or not ent:
+                    errors["base"] = "telegram_incomplete"
+                elif (err_key := await self._test_telegram(cfg, ent)) is not None:
+                    errors["base"] = err_key
+
+            if not errors:
+                # never persist the transient test flag
+                user_input.pop(CONF_TELEGRAM_TEST, None)
+                data = self.config_entry.data | user_input
+                self.hass.config_entries.async_update_entry(self.config_entry, data=data)
+                return self.async_create_entry(title="", data=data)
 
         options_schema = vol.Schema(
             {
@@ -169,11 +208,13 @@ class ZendureOptionsFlowHandler(OptionsFlow):
                 vol.Optional(CONF_SIM, default=self.config_entry.data.get(CONF_SIM, False)): bool,
                 vol.Optional(CONF_TELEGRAM_CONFIG_ENTRY_ID, default=self.config_entry.data.get(CONF_TELEGRAM_CONFIG_ENTRY_ID, "")): str,
                 vol.Optional(CONF_TELEGRAM_ENTITY_ID, default=self.config_entry.data.get(CONF_TELEGRAM_ENTITY_ID, "")): str,
+                vol.Optional(CONF_TELEGRAM_TEST, default=False): bool,
             }
         )
 
         return self.async_show_form(
             step_id="init",
+            errors=errors,
             data_schema=self.add_suggested_values_to_schema(options_schema, self.config_entry.data),
         )
 

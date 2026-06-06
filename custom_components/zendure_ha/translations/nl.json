@@ -48,13 +48,19 @@
     }
   },
   "options": {
+    "error": {
+      "telegram_test_failed": "Telegram-test mislukt: controleer de configuratie-ID en de notifier-entiteit (zie het Home Assistant-logboek voor details).",
+      "telegram_incomplete": "Vul voor een test zowel de Telegram configuratie-ID als de notifier-entiteit in.",
+      "telegram_no_service": "De service telegram_bot.send_message is niet beschikbaar. Is de Telegram Bot-integratie ingesteld?"
+    },
     "step": {
       "init": {
         "data": {
           "scan_interval": "Scaninterval (seconden)",
           "auto_mqtt_user": "MQTT-gebruikers automatisch beheren",
           "telegram_config_entry_id": "Telegram-bot configuratie-ID (voor foutmeldingen)",
-          "telegram_entity_id": "Telegram-notifier entiteit (bijv. notify.mijn_bot)"
+          "telegram_entity_id": "Telegram-notifier entiteit (bijv. notify.mijn_bot)",
+          "telegram_test": "Stuur een test-Telegrambericht om de instellingen te controleren"
         },
         "description": "Pas je opties aan.",
         "title": "Zendure Integratie Opties"

@@ -50,6 +50,11 @@
     }
   },
   "options": {
+    "error": {
+      "telegram_test_failed": "Échec du test Telegram : vérifiez l'ID de configuration et l'entité du notifieur (détails dans le journal Home Assistant).",
+      "telegram_incomplete": "Pour envoyer un test, renseignez l'ID de configuration ET l'entité du notifieur Telegram.",
+      "telegram_no_service": "Le service telegram_bot.send_message est indisponible. L'intégration Telegram Bot est-elle configurée ?"
+    },
     "step": {
       "init": {
         "data": {
@@ -58,7 +63,8 @@
           "mqttlog": "Journaliser communication MQTT",
           "auto_mqtt_user": "Gérer automatiquement les utilisateurs MQTT",
           "telegram_config_entry_id": "ID de l'entrée de configuration du bot Telegram (alertes)",
-          "telegram_entity_id": "Entité Telegram du notifieur (ex. notify.mon_bot)"
+          "telegram_entity_id": "Entité Telegram du notifieur (ex. notify.mon_bot)",
+          "telegram_test": "Envoyer un message test Telegram pour vérifier les réglages"
         },
         "description": "Modifiez vos options.",
         "title": "Options de l'intégration Zendure"
