@@ -40,6 +40,7 @@ from .devices.hyper2000 import Hyper2000
 from .devices.solarflow800 import SolarFlow800, SolarFlow800Plus, SolarFlow800Pro
 from .devices.solarflow1600 import SolarFlow1600
 from .devices.solarflow2400 import SolarFlow2400AC, SolarFlow2400AC_Plus, SolarFlow2400Pro
+from .devices.solarflow4000 import SolarFlow4000AC_Plus
 from .devices.superbasev4600 import SuperBaseV4600
 from .devices.superbasev6400 import SuperBaseV6400
 
@@ -70,6 +71,7 @@ class Api:
         "solarflow 2400 ac": SolarFlow2400AC,
         "solarflow 2400 ac+": SolarFlow2400AC_Plus,
         "solarflow 2400 pro": SolarFlow2400Pro,
+        "solarflow4000ac+": SolarFlow4000AC_Plus,
         "superbase v6400": SuperBaseV6400,
         "superbase v4600": SuperBaseV4600,
     }
