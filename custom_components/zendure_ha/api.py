@@ -27,7 +27,7 @@ from .const import (
     CONF_MQTTPSW,
     CONF_MQTTSERVER,
     CONF_MQTTUSER,
-    CONF_TELEGRAM_CONFIG_ENTRY_ID,
+    CONF_NOTIFY_TARGETS,
     CONF_TELEGRAM_ENTITY_ID,
     CONF_WIFIPSW,
     CONF_WIFISSID,
@@ -89,8 +89,7 @@ class Api:
     localPassword: str = ""
     wifipsw: str = ""
     wifissid: str = ""
-    telegram_config_entry_id: str = ""
-    telegram_entity_id: str = ""
+    notify_targets: list[str] = []
 
     def Init(self, data: Mapping[str, Any], mqtt: Mapping[str, Any]) -> None:
         """Initialize Zendure Api."""
@@ -104,9 +103,11 @@ class Api:
         Api.wifissid = data.get(CONF_WIFISSID, "")
         Api.wifipsw = data.get(CONF_WIFIPSW, "")
 
-        # Get optional Telegram notification settings
-        Api.telegram_config_entry_id = data.get(CONF_TELEGRAM_CONFIG_ENTRY_ID, "")
-        Api.telegram_entity_id = data.get(CONF_TELEGRAM_ENTITY_ID, "")
+        # Get optional notification targets (list of notify.* entities).
+        # Migrate a legacy single Telegram notifier entity if present.
+        Api.notify_targets = list(data.get(CONF_NOTIFY_TARGETS, []) or [])
+        if not Api.notify_targets and (legacy := data.get(CONF_TELEGRAM_ENTITY_ID)):
+            Api.notify_targets = [legacy]
 
         # Get local Mqtt settings
         Api.localServer = data.get(CONF_MQTTSERVER, "")

@@ -47,9 +47,9 @@
   },
   "options": {
     "error": {
-      "telegram_test_failed": "Telegram test failed: check the config entry ID and notifier entity ID (see Home Assistant log for details).",
-      "telegram_incomplete": "To send a test, fill in both the Telegram config entry ID and the notifier entity ID.",
-      "telegram_no_service": "The telegram_bot.send_message service is not available. Is the Telegram Bot integration set up?"
+      "notify_test_failed": "Test notification failed: check the selected notify targets (see Home Assistant log for details).",
+      "notify_incomplete": "To send a test, select at least one notification target.",
+      "notify_no_service": "The notify.send_message service is not available."
     },
     "step": {
       "init": {
@@ -57,9 +57,8 @@
           "p1meter": "P1 Sensor for smart matching",
           "mqttlog": "Log MQTT communication",
           "auto_mqtt_user": "Automatically manage MQTT users",
-          "telegram_config_entry_id": "Telegram bot config entry ID (for error alerts)",
-          "telegram_entity_id": "Telegram notifier entity ID (e.g. notify.my_bot)",
-          "telegram_test": "Send a test Telegram message to verify the settings"
+          "notify_targets": "Notification targets for alerts (choose one or more)",
+          "notify_test": "Send a test notification to verify the targets"
         },
         "description": "Amend your options.",
         "title": "Zendure Integration Options"

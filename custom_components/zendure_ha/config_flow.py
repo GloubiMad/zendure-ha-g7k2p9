@@ -23,9 +23,9 @@ from .const import (
     CONF_MQTTUSER,
     CONF_P1METER,
     CONF_SIM,
-    CONF_TELEGRAM_CONFIG_ENTRY_ID,
+    CONF_NOTIFY_TARGETS,
+    CONF_NOTIFY_TEST,
     CONF_TELEGRAM_ENTITY_ID,
-    CONF_TELEGRAM_TEST,
     CONF_WIFIPSW,
     CONF_WIFISSID,
     DOMAIN,
@@ -155,50 +155,56 @@ class ZendureConfigFlow(ConfigFlow, domain=DOMAIN):
 class ZendureOptionsFlowHandler(OptionsFlow):
     """Handles the options flow."""
 
-    async def _test_telegram(self, config_entry_id: str, entity_id: str) -> str | None:
-        """Send a test Telegram message. Returns None on success, else an error key."""
-        if not self.hass.services.has_service("telegram_bot", "send_message"):
-            return "telegram_no_service"
+    async def _test_notify(self, targets: list[str]) -> str | None:
+        """Send a test message to every chosen notify target.
+
+        Returns None on success, else a translation error key.
+        """
+        if not self.hass.services.has_service("notify", "send_message"):
+            return "notify_no_service"
         try:
             await self.hass.services.async_call(
-                "telegram_bot",
+                "notify",
                 "send_message",
                 {
-                    "config_entry_id": config_entry_id,
+                    "entity_id": targets,
                     "title": "Zendure",
-                    "message": "Zendure test notification - your Telegram settings are correct.",
-                    "entity_id": [entity_id],
-                    "parse_mode": "plain_text",
+                    "message": "Zendure test notification - your settings are correct.",
                 },
                 blocking=True,
             )
         except Exception as err:  # pylint: disable=broad-except
-            _LOGGER.warning("Telegram test failed: %s", err)
-            return "telegram_test_failed"
+            _LOGGER.warning("Notify test failed: %s", err)
+            return "notify_test_failed"
         return None
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Handle options flow."""
         errors: dict[str, str] = {}
         if user_input is not None:
-            cfg = user_input.get(CONF_TELEGRAM_CONFIG_ENTRY_ID, "")
-            ent = user_input.get(CONF_TELEGRAM_ENTITY_ID, "")
+            targets = user_input.get(CONF_NOTIFY_TARGETS, []) or []
 
             # Optional verification: when the test box is ticked, actually send a
-            # message with the entered IDs so the user sees it arrive. If it
+            # message to the chosen targets so the user sees it arrive. If it
             # fails, re-show the form with an error instead of saving blindly.
-            if user_input.get(CONF_TELEGRAM_TEST, False):
-                if not cfg or not ent:
-                    errors["base"] = "telegram_incomplete"
-                elif (err_key := await self._test_telegram(cfg, ent)) is not None:
+            if user_input.get(CONF_NOTIFY_TEST, False):
+                if not targets:
+                    errors["base"] = "notify_incomplete"
+                elif (err_key := await self._test_notify(targets)) is not None:
                     errors["base"] = err_key
 
             if not errors:
                 # never persist the transient test flag
-                user_input.pop(CONF_TELEGRAM_TEST, None)
+                user_input.pop(CONF_NOTIFY_TEST, None)
                 data = self.config_entry.data | user_input
                 self.hass.config_entries.async_update_entry(self.config_entry, data=data)
                 return self.async_create_entry(title="", data=data)
+
+        # Default: keep current targets; migrate a legacy single Telegram entity.
+        current_targets = self.config_entry.data.get(CONF_NOTIFY_TARGETS)
+        if not current_targets:
+            legacy = self.config_entry.data.get(CONF_TELEGRAM_ENTITY_ID)
+            current_targets = [legacy] if legacy else []
 
         options_schema = vol.Schema(
             {
@@ -206,16 +212,17 @@ class ZendureOptionsFlowHandler(OptionsFlow):
                 vol.Required(CONF_MQTTLOG, default=self.config_entry.data.get(CONF_MQTTLOG, False)): bool,
                 vol.Optional(CONF_AUTO_MQTT_USER, default=self.config_entry.data.get(CONF_AUTO_MQTT_USER, False)): bool,
                 vol.Optional(CONF_SIM, default=self.config_entry.data.get(CONF_SIM, False)): bool,
-                vol.Optional(CONF_TELEGRAM_CONFIG_ENTRY_ID, default=self.config_entry.data.get(CONF_TELEGRAM_CONFIG_ENTRY_ID, "")): str,
-                vol.Optional(CONF_TELEGRAM_ENTITY_ID, default=self.config_entry.data.get(CONF_TELEGRAM_ENTITY_ID, "")): str,
-                vol.Optional(CONF_TELEGRAM_TEST, default=False): bool,
+                vol.Optional(CONF_NOTIFY_TARGETS, default=current_targets): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="notify", multiple=True)
+                ),
+                vol.Optional(CONF_NOTIFY_TEST, default=False): bool,
             }
         )
 
         return self.async_show_form(
             step_id="init",
             errors=errors,
-            data_schema=self.add_suggested_values_to_schema(options_schema, self.config_entry.data),
+            data_schema=options_schema,
         )
 
 

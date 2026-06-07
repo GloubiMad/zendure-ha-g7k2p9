@@ -602,39 +602,26 @@ class ZendureDevice(EntityDevice):
 
             persistent_notification.async_create(self.hass, (msg), "Zendure", "zendure_ha")
 
-            # On error, also push a Telegram notification so the user knows
-            # immediately without having to open the HA UI. Uses the
-            # telegram_bot.send_message service with the bot config stored
-            # in the integration options (skipped if not configured).
+            # On error, also push a notification to every configured target so
+            # the user knows immediately without opening the HA UI. Generic:
+            # uses notify.send_message against the chosen notify.* entities
+            # (Telegram, mobile app, email...). Skipped if none configured.
             from .api import Api  # local import to avoid circular at module load
 
-            if (
-                had_error
-                and Api.telegram_config_entry_id
-                and Api.telegram_entity_id
-                and self.hass.services.has_service("telegram_bot", "send_message")
-            ):
+            if had_error and Api.notify_targets and self.hass.services.has_service("notify", "send_message"):
                 try:
                     await self.hass.services.async_call(
-                        "telegram_bot",
+                        "notify",
                         "send_message",
                         {
-                            "config_entry_id": Api.telegram_config_entry_id,
+                            "entity_id": Api.notify_targets,
                             "title": "Zendure - Reset connection failed",
                             "message": msg,
-                            "entity_id": [Api.telegram_entity_id],
-                            # Force plain text: the message contains MAC
-                            # addresses, URLs and dashes that MarkdownV2 (the
-                            # bot's default parse mode) would reject with
-                            # "character '-' is reserved and must be escaped".
-                            # telegram_bot accepts: html, markdown, markdownv2,
-                            # plain_text -> plain_text disables all parsing.
-                            "parse_mode": "plain_text",
                         },
                         blocking=False,
                     )
                 except Exception as err:  # pylint: disable=broad-except
-                    _LOGGER.warning("Could not send Telegram notification: %s", err)
+                    _LOGGER.warning("Could not send notification: %s", err)
 
             _LOGGER.info("BLE update ready")
 
