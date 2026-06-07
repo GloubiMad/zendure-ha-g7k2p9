@@ -25,8 +25,10 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.loader import async_get_integration
 
 from .api import Api
+from .button import ZendureButton
 from .const import (
     CONF_AUTO_MQTT_USER,
+    CONF_NOTIFY_TARGETS,
     CONF_P1METER,
     DOMAIN,
     DeviceState,
@@ -121,6 +123,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.availableKwh = ZendureSensor(self, "available_kwh", None, "kWh", "energy_storage", None, 1)
         self.totalKwh = ZendureSensor(self, "total_kwh", None, "kWh", "energy_storage", "measurement", 2)
         self.power = ZendureSensor(self, "power", None, "W", "power", "measurement", 0)
+        self.notifyTest = ZendureButton(self, "test_notification", self.test_notification)
 
         if self.config_entry is None:
             return
@@ -287,6 +290,39 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     if len(self.devices) > 0:
                         for d in self.devices:
                             await d.power_off()
+
+    async def test_notification(self, _button: ZendureButton) -> None:
+        """Send a test notification to each configured target and report results."""
+        targets = list(self.config_entry.data.get(CONF_NOTIFY_TARGETS, []) or []) if self.config_entry else []
+        if not targets:
+            persistent_notification.async_create(
+                self.hass, "No notification target configured. Set one in the integration options.", "Zendure", "zendure_ha"
+            )
+            return
+
+        ok: list[str] = []
+        failed: list[str] = []
+        # Send per target so one bad target does not block the others, and so
+        # we can report exactly which one fails and why.
+        for target in targets:
+            try:
+                await self.hass.services.async_call(
+                    "notify",
+                    "send_message",
+                    {"entity_id": target, "title": "Zendure", "message": "Zendure test notification - this target works."},
+                    blocking=True,
+                )
+                ok.append(target)
+            except Exception as err:  # pylint: disable=broad-except
+                _LOGGER.warning("Test notification to %s failed: %s", target, err)
+                failed.append(f"{target}: {err}")
+
+        lines = []
+        if ok:
+            lines.append("OK: " + ", ".join(ok))
+        if failed:
+            lines.append("FAILED:\n- " + "\n- ".join(failed))
+        persistent_notification.async_create(self.hass, "\n".join(lines), "Zendure - Test notification", "zendure_ha")
 
     async def _async_update_data(self) -> None:
 

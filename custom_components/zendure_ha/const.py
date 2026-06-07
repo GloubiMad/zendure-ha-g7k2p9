@@ -18,10 +18,8 @@ CONF_MQTTPSW = "mqttpsw"
 CONF_WIFISSID = "wifissid"
 CONF_WIFIPSW = "wifipsw"
 CONF_AUTO_MQTT_USER = "auto_mqtt_user"
-CONF_TELEGRAM_CONFIG_ENTRY_ID = "telegram_config_entry_id"  # legacy, kept for migration
 CONF_TELEGRAM_ENTITY_ID = "telegram_entity_id"  # legacy, kept for migration
 CONF_NOTIFY_TARGETS = "notify_targets"  # list of notify.* entities for alerts
-CONF_NOTIFY_TEST = "notify_test"  # transient: send a test on save
 
 CONF_HAKEY = "C*dafwArEOXK"
 

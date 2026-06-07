@@ -24,7 +24,6 @@ from .const import (
     CONF_P1METER,
     CONF_SIM,
     CONF_NOTIFY_TARGETS,
-    CONF_NOTIFY_TEST,
     CONF_TELEGRAM_ENTITY_ID,
     CONF_WIFIPSW,
     CONF_WIFISSID,
@@ -155,50 +154,12 @@ class ZendureConfigFlow(ConfigFlow, domain=DOMAIN):
 class ZendureOptionsFlowHandler(OptionsFlow):
     """Handles the options flow."""
 
-    async def _test_notify(self, targets: list[str]) -> str | None:
-        """Send a test message to every chosen notify target.
-
-        Returns None on success, else a translation error key.
-        """
-        if not self.hass.services.has_service("notify", "send_message"):
-            return "notify_no_service"
-        try:
-            await self.hass.services.async_call(
-                "notify",
-                "send_message",
-                {
-                    "entity_id": targets,
-                    "title": "Zendure",
-                    "message": "Zendure test notification - your settings are correct.",
-                },
-                blocking=True,
-            )
-        except Exception as err:  # pylint: disable=broad-except
-            _LOGGER.warning("Notify test failed: %s", err)
-            return "notify_test_failed"
-        return None
-
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Handle options flow."""
-        errors: dict[str, str] = {}
         if user_input is not None:
-            targets = user_input.get(CONF_NOTIFY_TARGETS, []) or []
-
-            # Optional verification: when the test box is ticked, actually send a
-            # message to the chosen targets so the user sees it arrive. If it
-            # fails, re-show the form with an error instead of saving blindly.
-            if user_input.get(CONF_NOTIFY_TEST, False):
-                if not targets:
-                    errors["base"] = "notify_incomplete"
-                elif (err_key := await self._test_notify(targets)) is not None:
-                    errors["base"] = err_key
-
-            if not errors:
-                # never persist the transient test flag
-                user_input.pop(CONF_NOTIFY_TEST, None)
-                data = self.config_entry.data | user_input
-                self.hass.config_entries.async_update_entry(self.config_entry, data=data)
-                return self.async_create_entry(title="", data=data)
+            data = self.config_entry.data | user_input
+            self.hass.config_entries.async_update_entry(self.config_entry, data=data)
+            return self.async_create_entry(title="", data=data)
 
         # Default: keep current targets; migrate a legacy single Telegram entity.
         current_targets = self.config_entry.data.get(CONF_NOTIFY_TARGETS)
@@ -215,15 +176,10 @@ class ZendureOptionsFlowHandler(OptionsFlow):
                 vol.Optional(CONF_NOTIFY_TARGETS, default=current_targets): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain="notify", multiple=True)
                 ),
-                vol.Optional(CONF_NOTIFY_TEST, default=False): bool,
             }
         )
 
-        return self.async_show_form(
-            step_id="init",
-            errors=errors,
-            data_schema=options_schema,
-        )
+        return self.async_show_form(step_id="init", data_schema=options_schema)
 
 
 class ZendureConnectionError(HomeAssistantError):

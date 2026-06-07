@@ -46,21 +46,15 @@
     }
   },
   "options": {
-    "error": {
-      "notify_test_failed": "Test notification failed: check the selected notify targets (see Home Assistant log for details).",
-      "notify_incomplete": "To send a test, select at least one notification target.",
-      "notify_no_service": "The notify.send_message service is not available."
-    },
     "step": {
       "init": {
         "data": {
           "p1meter": "P1 Sensor for smart matching",
           "mqttlog": "Log MQTT communication",
           "auto_mqtt_user": "Automatically manage MQTT users",
-          "notify_targets": "Notification targets for alerts (choose one or more)",
-          "notify_test": "Send a test notification to verify the targets"
+          "notify_targets": "Notification targets for alerts (choose one or more)"
         },
-        "description": "Amend your options.",
+        "description": "Amend your options. Use the 'Test notification' button on the Zendure Manager device to verify your targets.",
         "title": "Zendure Integration Options"
       }
     }
@@ -69,6 +63,9 @@
     "button": {
       "mqtt_reset": {
         "name": "Reset connection"
+      },
+      "test_notification": {
+        "name": "Test notification"
       }
     },
     "binary_sensor": {

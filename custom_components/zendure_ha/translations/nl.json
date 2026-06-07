@@ -48,20 +48,14 @@
     }
   },
   "options": {
-    "error": {
-      "notify_test_failed": "Testmelding mislukt: controleer de gekozen meldingsdoelen (zie het Home Assistant-logboek voor details).",
-      "notify_incomplete": "Selecteer voor een test minstens een meldingsdoel.",
-      "notify_no_service": "De service notify.send_message is niet beschikbaar."
-    },
     "step": {
       "init": {
         "data": {
           "scan_interval": "Scaninterval (seconden)",
           "auto_mqtt_user": "MQTT-gebruikers automatisch beheren",
-          "notify_targets": "Meldingsdoelen voor waarschuwingen (een of meer)",
-          "notify_test": "Stuur een testmelding om de doelen te controleren"
+          "notify_targets": "Meldingsdoelen voor waarschuwingen (een of meer)"
         },
-        "description": "Pas je opties aan.",
+        "description": "Pas je opties aan. Gebruik de knop 'Testmelding' op het Zendure Manager-apparaat om je doelen te controleren.",
         "title": "Zendure Integratie Opties"
       }
     }
@@ -70,6 +64,9 @@
     "button": {
       "mqtt_reset": {
         "name": "Reset verbinding"
+      },
+      "test_notification": {
+        "name": "Testmelding"
       }
     },
     "binary_sensor": {

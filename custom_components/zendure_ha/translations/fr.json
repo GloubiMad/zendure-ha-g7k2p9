@@ -50,11 +50,6 @@
     }
   },
   "options": {
-    "error": {
-      "notify_test_failed": "Échec de la notification test : vérifiez les cibles sélectionnées (détails dans le journal Home Assistant).",
-      "notify_incomplete": "Pour envoyer un test, sélectionnez au moins une cible de notification.",
-      "notify_no_service": "Le service notify.send_message est indisponible."
-    },
     "step": {
       "init": {
         "data": {
@@ -62,10 +57,9 @@
           "p1meter": "Capteur P1 pour le couplage intelligent",
           "mqttlog": "Journaliser communication MQTT",
           "auto_mqtt_user": "Gérer automatiquement les utilisateurs MQTT",
-          "notify_targets": "Cibles de notification pour les alertes (une ou plusieurs)",
-          "notify_test": "Envoyer une notification test pour vérifier les cibles"
+          "notify_targets": "Cibles de notification pour les alertes (une ou plusieurs)"
         },
-        "description": "Modifiez vos options.",
+        "description": "Modifiez vos options. Utilisez le bouton « Test notification » sur l'appareil Zendure Manager pour vérifier vos cibles.",
         "title": "Options de l'intégration Zendure"
       }
     }
@@ -74,6 +68,9 @@
     "button": {
       "mqtt_reset": {
         "name": "Reset connexion"
+      },
+      "test_notification": {
+        "name": "Test notification"
       }
     },
     "binary_sensor": {

@@ -35,21 +35,15 @@
     }
   },
   "options": {
-    "error": {
-      "notify_test_failed": "Test-Benachrichtigung fehlgeschlagen: gewählte Ziele prüfen (Details im Home-Assistant-Log).",
-      "notify_incomplete": "Für einen Test bitte mindestens ein Benachrichtigungsziel auswählen.",
-      "notify_no_service": "Der Dienst notify.send_message ist nicht verfügbar."
-    },
     "step": {
       "init": {
         "data": {
           "p1meter": "P1 Sensor für Smart Matching",
           "mqttlog": "MQTT-Kommunikation loggen",
           "auto_mqtt_user": "MQTT-Benutzer automatisch verwalten",
-          "notify_targets": "Benachrichtigungsziele für Warnungen (eines oder mehrere)",
-          "notify_test": "Test-Benachrichtigung senden, um die Ziele zu prüfen"
+          "notify_targets": "Benachrichtigungsziele für Warnungen (eines oder mehrere)"
         },
-        "description": "Optionen anpassen",
+        "description": "Optionen anpassen. Nutze den Button 'Test-Benachrichtigung' am Gerät Zendure Manager, um die Ziele zu prüfen.",
         "title": "Zendure Integrationsoptionen"
       }
     }
@@ -58,6 +52,9 @@
     "button": {
       "mqtt_reset": {
         "name": "Reset Verbindung"
+      },
+      "test_notification": {
+        "name": "Test-Benachrichtigung"
       }
     },
     "binary_sensor": {
