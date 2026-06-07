@@ -6,6 +6,7 @@ import logging
 from typing import Any
 
 import voluptuous as vol
+from homeassistant.components.persistent_notification import async_create as async_create_notification
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult, OptionsFlow
 from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
@@ -154,12 +155,14 @@ class ZendureConfigFlow(ConfigFlow, domain=DOMAIN):
 class ZendureOptionsFlowHandler(OptionsFlow):
     """Handles the options flow."""
 
+    _pending: dict[str, Any] = {}
+
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        """Handle options flow."""
+        """Show the options form (selector for notification targets, etc.)."""
         if user_input is not None:
-            data = self.config_entry.data | user_input
-            self.hass.config_entries.async_update_entry(self.config_entry, data=data)
-            return self.async_create_entry(title="", data=data)
+            # Stash the chosen options, then offer Test / Save buttons.
+            self._pending = dict(self.config_entry.data) | user_input
+            return await self.async_step_confirm()
 
         # Default: keep current targets; migrate a legacy single Telegram entity.
         current_targets = self.config_entry.data.get(CONF_NOTIFY_TARGETS)
@@ -180,6 +183,45 @@ class ZendureOptionsFlowHandler(OptionsFlow):
         )
 
         return self.async_show_form(step_id="init", data_schema=options_schema)
+
+    async def async_step_confirm(self, _user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Offer two buttons after selection: test the targets, or save."""
+        return self.async_show_menu(step_id="confirm", menu_options=["test", "save"])
+
+    async def async_step_test(self, _user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Send a test to every selected target, report per-target, return to the menu."""
+        targets = list(self._pending.get(CONF_NOTIFY_TARGETS, []) or [])
+        if not targets:
+            async_create_notification(self.hass, "No notification target selected.", "Zendure - Test notification", "zendure_ha")
+            return await self.async_step_confirm()
+
+        ok: list[str] = []
+        failed: list[str] = []
+        for target in targets:
+            try:
+                await self.hass.services.async_call(
+                    "notify",
+                    "send_message",
+                    {"entity_id": target, "title": "Zendure", "message": "Zendure test notification - this target works."},
+                    blocking=True,
+                )
+                ok.append(target)
+            except Exception as err:  # pylint: disable=broad-except
+                _LOGGER.warning("Test notification to %s failed: %s", target, err)
+                failed.append(f"{target}: {err}")
+
+        lines = []
+        if ok:
+            lines.append("OK: " + ", ".join(ok))
+        if failed:
+            lines.append("FAILED:\n- " + "\n- ".join(failed))
+        async_create_notification(self.hass, "\n".join(lines), "Zendure - Test notification", "zendure_ha")
+        return await self.async_step_confirm()
+
+    async def async_step_save(self, _user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Persist the pending options."""
+        self.hass.config_entries.async_update_entry(self.config_entry, data=self._pending)
+        return self.async_create_entry(title="", data=self._pending)
 
 
 class ZendureConnectionError(HomeAssistantError):

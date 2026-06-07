@@ -55,8 +55,16 @@
           "auto_mqtt_user": "MQTT-gebruikers automatisch beheren",
           "notify_targets": "Meldingsdoelen voor waarschuwingen (een of meer)"
         },
-        "description": "Pas je opties aan. Gebruik de knop 'Testmelding' op het Zendure Manager-apparaat om je doelen te controleren.",
+        "description": "Pas je opties aan.",
         "title": "Zendure Integratie Opties"
+      },
+      "confirm": {
+        "title": "Meldingsdoelen",
+        "description": "Test de gekozen doelen of sla op.",
+        "menu_options": {
+          "test": "Test de gekozen meldingen",
+          "save": "Opslaan"
+        }
       }
     }
   },
@@ -64,9 +72,6 @@
     "button": {
       "mqtt_reset": {
         "name": "Reset verbinding"
-      },
-      "test_notification": {
-        "name": "Testmelding"
       }
     },
     "binary_sensor": {

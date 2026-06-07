@@ -43,8 +43,16 @@
           "auto_mqtt_user": "MQTT-Benutzer automatisch verwalten",
           "notify_targets": "Benachrichtigungsziele für Warnungen (eines oder mehrere)"
         },
-        "description": "Optionen anpassen. Nutze den Button 'Test-Benachrichtigung' am Gerät Zendure Manager, um die Ziele zu prüfen.",
+        "description": "Optionen anpassen.",
         "title": "Zendure Integrationsoptionen"
+      },
+      "confirm": {
+        "title": "Benachrichtigungsziele",
+        "description": "Die gewählten Ziele testen oder speichern.",
+        "menu_options": {
+          "test": "Gewählte Benachrichtigungen testen",
+          "save": "Speichern"
+        }
       }
     }
   },
@@ -52,9 +60,6 @@
     "button": {
       "mqtt_reset": {
         "name": "Reset Verbindung"
-      },
-      "test_notification": {
-        "name": "Test-Benachrichtigung"
       }
     },
     "binary_sensor": {
