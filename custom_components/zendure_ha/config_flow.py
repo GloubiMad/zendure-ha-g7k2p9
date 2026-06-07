@@ -31,6 +31,7 @@ from .const import (
     DOMAIN,
 )
 from .manager import ZendureConfigEntry
+from .notifications import async_notify_targets
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -195,20 +196,12 @@ class ZendureOptionsFlowHandler(OptionsFlow):
             async_create_notification(self.hass, "No notification target selected.", "Zendure - Test notification", "zendure_ha")
             return await self.async_step_confirm()
 
-        ok: list[str] = []
-        failed: list[str] = []
-        for target in targets:
-            try:
-                await self.hass.services.async_call(
-                    "notify",
-                    "send_message",
-                    {"entity_id": target, "title": "Zendure", "message": "Zendure test notification - this target works."},
-                    blocking=True,
-                )
-                ok.append(target)
-            except Exception as err:  # pylint: disable=broad-except
-                _LOGGER.warning("Test notification to %s failed: %s", target, err)
-                failed.append(f"{target}: {err}")
+        ok, failed = await async_notify_targets(
+            self.hass,
+            targets,
+            "Zendure",
+            "Zendure test notification - this target works.",
+        )
 
         lines = []
         if ok:

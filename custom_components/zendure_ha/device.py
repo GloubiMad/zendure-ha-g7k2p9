@@ -609,19 +609,14 @@ class ZendureDevice(EntityDevice):
             from .api import Api  # local import to avoid circular at module load
 
             if had_error and Api.notify_targets and self.hass.services.has_service("notify", "send_message"):
-                try:
-                    await self.hass.services.async_call(
-                        "notify",
-                        "send_message",
-                        {
-                            "entity_id": Api.notify_targets,
-                            "title": "Zendure - Reset connection failed",
-                            "message": msg,
-                        },
-                        blocking=False,
-                    )
-                except Exception as err:  # pylint: disable=broad-except
-                    _LOGGER.warning("Could not send notification: %s", err)
+                from .notifications import async_notify_targets  # local import to avoid circular at module load
+
+                await async_notify_targets(
+                    self.hass,
+                    Api.notify_targets,
+                    "Zendure - Reset connection failed",
+                    msg,
+                )
 
             _LOGGER.info("BLE update ready")
 
