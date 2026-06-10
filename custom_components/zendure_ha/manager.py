@@ -748,10 +748,17 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 # d.pwr_produced is negative, but self.produced is positive
                 if setpoint > 0 and self.produced > SmartMode.POWER_START and self.operation == ManagerMode.MATCHING_CHARGE:
                     await self.power_discharge(min(self.produced, setpoint))
+                # Creux bref pendant le stockage solaire : on maintient un plancher au lieu
+                # de couper (power_discharge(0)), même logique anti cloud-flicker que MATCHING,
+                # étendue ici car c'est en STORE_SOLAR/MATCHING_CHARGE que la charge cyclait.
+                elif setpoint > 0 and (floor := self.chargeFloor.asInt) > 0 and time < self.charge_hold_until:
+                    await self.power_charge(-floor, time)
                 # send device into idle-mode
                 elif setpoint > 0:
                     await self.power_discharge(0)
                 else:
+                    # Charge sur surplus → (ré)arme la fenêtre de maintien.
+                    self.charge_hold_until = time + timedelta(seconds=self.chargeHoldWindow.asInt)
                     await self.power_charge(min(0, setpoint), time)
 
             case ManagerMode.MANUAL:
