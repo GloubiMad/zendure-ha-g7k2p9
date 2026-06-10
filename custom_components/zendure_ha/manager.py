@@ -710,8 +710,13 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         # setpoint never goes below 0 when p1 >= 0: a SOCFULL device producing solar
         # should still cover home demand, not trigger charge mode (fixes #1151 output
         # cycling to 0W with bypass forbidden + 100% SoC).
-        if self.discharge_bypass > 0:
-            setpoint = max(0 if p1 >= 0 else setpoint - self.discharge_bypass, setpoint - self.discharge_bypass)
+        # Ne retrancher le crédit bypass (solaire d'un device SOCFULL) QUE lorsqu'on
+        # EXPORTE (p1 < 0). En import réseau réel (p1 >= 0), le retrancher masquait la
+        # demande et empêchait les AUTRES batteries de décharger (bug 2e Hyper idle
+        # alors que la maison importait). discharge_produced est déjà soustrait dans
+        # dev_start de power_discharge : le retrancher ici aussi = double comptage.
+        if self.discharge_bypass > 0 and p1 < 0:
+            setpoint -= self.discharge_bypass
 
         # Update power distribution.
         _LOGGER.info("P1 ======> p1:%s isFast:%s, setpoint:%sW stored:%sW", p1, isFast, setpoint, self.produced)
