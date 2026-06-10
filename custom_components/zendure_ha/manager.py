@@ -121,6 +121,11 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.availableKwh = ZendureSensor(self, "available_kwh", None, "kWh", "energy_storage", None, 1)
         self.totalKwh = ZendureSensor(self, "total_kwh", None, "kWh", "energy_storage", "measurement", 2)
         self.power = ZendureSensor(self, "power", None, "W", "power", "measurement", 0)
+        # Agrégats de parc pondérés par la capacité (recalculés à chaque update()):
+        #  - weighted_soc : Σ(capacité × niveau) / Σ capacité → vrai SoC moyen %
+        #  - usable_energy : Σ(énergie dispo) / Σ capacité × 100 → % utilisable au-dessus du SoC mini
+        self.weightedSoc = ZendureSensor(self, "weighted_soc", None, "%", "battery", "measurement", 1)
+        self.usableEnergy = ZendureSensor(self, "usable_energy", None, "%", None, "measurement", 1, icon="mdi:battery-arrow-down-outline")
 
         if self.config_entry is None:
             return
@@ -306,8 +311,12 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         time = datetime.now()
         kwh = 0
+        weighted_soc = 0.0  # Σ(capacité × niveau de batterie)
+        usable_kwh = 0.0  # Σ énergie disponible (au-dessus du SoC mini)
         for device in self.devices:
             kwh += device.kWh
+            weighted_soc += device.kWh * device.electricLevel.asNumber
+            usable_kwh += device.availableKwh.asNumber
             if isinstance(device, ZendureLegacy) and device.bleMac is None:
                 for si in bluetooth.async_discovered_service_info(self.hass, False):
                     if isBleDevice(device, si):
@@ -320,6 +329,10 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             device.setStatus()
         self.update_count += 1
         self.totalKwh.update_value(kwh)
+        # Pourcentages pondérés par la capacité (ignorés tant qu'aucune capacité n'est connue).
+        if kwh > 0:
+            self.weightedSoc.update_value(round(weighted_soc / kwh, 1))
+            self.usableEnergy.update_value(round(max(0.0, usable_kwh) / kwh * 100, 1))
 
         # MQTT watchdog: paho's loop_start() is supposed to auto-reconnect,
         # but silent failures happen (broker drops the session, token rotates,

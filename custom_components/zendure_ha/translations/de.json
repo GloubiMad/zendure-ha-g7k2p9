@@ -115,6 +115,12 @@
       "available_kwh": {
         "name": "Verfügbare Energie"
       },
+      "weighted_soc": {
+        "name": "Gewichteter Batteriestand"
+      },
+      "usable_energy": {
+        "name": "Nutzbare Energie"
+      },
       "total_kwh": {
         "name": "Gesamtkapazität Batterie"
       },

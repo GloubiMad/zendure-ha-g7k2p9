@@ -112,6 +112,12 @@
       "available_kwh": {
         "name": "Beschikbare Energie"
       },
+      "weighted_soc": {
+        "name": "Gewogen batterijniveau"
+      },
+      "usable_energy": {
+        "name": "Bruikbare energie"
+      },
       "auto_model": {
         "name": "Batterijprogramma",
         "state": {

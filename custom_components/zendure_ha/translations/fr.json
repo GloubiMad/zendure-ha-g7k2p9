@@ -116,6 +116,12 @@
       "available_kwh": {
         "name": "Énergie disponible"
       },
+      "weighted_soc": {
+        "name": "Niveau de batterie pondéré"
+      },
+      "usable_energy": {
+        "name": "Énergie utilisable"
+      },
       "auto_model": {
         "name": "Programme de batterie",
         "state": {

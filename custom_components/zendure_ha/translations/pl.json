@@ -120,6 +120,12 @@
       "available_kwh": {
         "name": "Dostępna energia"
       },
+      "weighted_soc": {
+        "name": "Ważony poziom baterii"
+      },
+      "usable_energy": {
+        "name": "Energia użyteczna"
+      },
       "total_kwh": {
         "name": "Całkowita pojemność baterii"
       },

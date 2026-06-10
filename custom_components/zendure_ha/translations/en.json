@@ -126,6 +126,12 @@
       "available_kwh": {
         "name": "Available Energy"
       },
+      "weighted_soc": {
+        "name": "Weighted battery level"
+      },
+      "usable_energy": {
+        "name": "Usable energy"
+      },
       "total_kwh": {
         "name": "Total Battery Capacity"
       },
