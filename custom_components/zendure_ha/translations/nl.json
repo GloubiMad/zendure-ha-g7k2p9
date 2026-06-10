@@ -68,6 +68,7 @@
         "description": "Test de gekozen doelen of sla op.",
         "menu_options": {
           "test": "Test de gekozen meldingen",
+          "test_influx": "InfluxDB-verbinding testen",
           "save": "Opslaan"
         }
       }

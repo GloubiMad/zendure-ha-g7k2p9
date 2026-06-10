@@ -198,8 +198,8 @@ class ZendureOptionsFlowHandler(OptionsFlow):
         return self.async_show_form(step_id="init", data_schema=options_schema)
 
     async def async_step_confirm(self, _user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        """Offer two buttons after selection: test the targets, or save."""
-        return self.async_show_menu(step_id="confirm", menu_options=["test", "save"])
+        """Offer buttons after selection: test notify targets, test InfluxDB, or save."""
+        return self.async_show_menu(step_id="confirm", menu_options=["test", "test_influx", "save"])
 
     async def async_step_test(self, _user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Send a test to every selected target, report per-target, return to the menu."""
@@ -221,6 +221,27 @@ class ZendureOptionsFlowHandler(OptionsFlow):
         if failed:
             lines.append("FAILED:\n- " + "\n- ".join(failed))
         async_create_notification(self.hass, "\n".join(lines), "Zendure - Test notification", "zendure_ha")
+        return await self.async_step_confirm()
+
+    async def async_step_test_influx(self, _user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Write a test point to InfluxDB and report the exact result, then return to the menu."""
+        url = self._pending.get(CONF_INFLUX_URL)
+        token = self._pending.get(CONF_INFLUX_TOKEN)
+        if not url or not token:
+            async_create_notification(self.hass, "URL ou jeton InfluxDB manquant.", "Zendure - Test InfluxDB", "zendure_ha")
+            return await self.async_step_confirm()
+
+        from .influx import ZendureInflux
+
+        bucket = self._pending.get(CONF_INFLUX_BUCKET) or "HA_ZENDURE"
+        writer = ZendureInflux(self.hass, url, self._pending.get(CONF_INFLUX_ORG, ""), token, bucket)
+        ok, detail = await writer.test()
+        async_create_notification(
+            self.hass,
+            ("OK - " if ok else "ECHEC - ") + detail + f"\n(org: {self._pending.get(CONF_INFLUX_ORG, '')}, bucket: {bucket})",
+            "Zendure - Test InfluxDB",
+            "zendure_ha",
+        )
         return await self.async_step_confirm()
 
     async def async_step_save(self, _user_input: dict[str, Any] | None = None) -> ConfigFlowResult:

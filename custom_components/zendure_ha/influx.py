@@ -81,3 +81,20 @@ class ZendureInflux:
             if self._failed < 3:
                 _LOGGER.warning("InfluxDB write error: %s", err)
             self._failed += 1
+
+    async def test(self) -> tuple[bool, str]:
+        """Write one test point and return (ok, detail) — surfaces the real error for the config flow."""
+        try:
+            session = async_get_clientsession(self.hass)
+            async with session.post(
+                self.write_url,
+                data=b"zendure_test,source=config_flow value=1",
+                headers=self.headers,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                text = await resp.text()
+                if resp.status < 400:
+                    return True, f"OK (HTTP {resp.status}) - point de test ecrit."
+                return False, f"HTTP {resp.status}: {text[:300]}"
+        except Exception as err:  # pylint: disable=broad-except
+            return False, f"{type(err).__name__}: {err}"

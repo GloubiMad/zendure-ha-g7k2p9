@@ -67,6 +67,7 @@
         "description": "Test the selected targets, or save.",
         "menu_options": {
           "test": "Test the selected notifications",
+          "test_influx": "Test InfluxDB connection",
           "save": "Save"
         }
       }

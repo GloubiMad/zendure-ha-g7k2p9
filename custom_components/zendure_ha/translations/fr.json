@@ -72,6 +72,7 @@
         "description": "Testez les cibles sélectionnées, ou enregistrez.",
         "menu_options": {
           "test": "Tester les notifications sélectionnées",
+          "test_influx": "Tester la connexion InfluxDB",
           "save": "Enregistrer"
         }
       }
