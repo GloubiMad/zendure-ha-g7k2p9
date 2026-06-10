@@ -101,6 +101,12 @@
       "manual_power": {
         "name": "Manuelle Leistung"
       },
+      "charge_floor": {
+        "name": "Lade-Haltepegel"
+      },
+      "charge_hold_window": {
+        "name": "Lade-Haltefenster"
+      },
       "min_soc": {
         "name": "SoC-Minimum"
       },
@@ -117,6 +123,9 @@
       },
       "weighted_soc": {
         "name": "Gewichteter Batteriestand"
+      },
+      "setpoint": {
+        "name": "Sollwert"
       },
       "usable_energy": {
         "name": "Nutzbare Energie"

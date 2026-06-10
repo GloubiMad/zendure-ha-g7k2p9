@@ -98,6 +98,12 @@
       "manual_power": {
         "name": "Handmatig vermogen"
       },
+      "charge_floor": {
+        "name": "Laad-vasthoudvloer"
+      },
+      "charge_hold_window": {
+        "name": "Laad-vasthoudvenster"
+      },
       "min_soc": {
         "name": "SOC Minimaal"
       },
@@ -114,6 +120,9 @@
       },
       "weighted_soc": {
         "name": "Gewogen batterijniveau"
+      },
+      "setpoint": {
+        "name": "Streefwaarde"
       },
       "usable_energy": {
         "name": "Bruikbare energie"

@@ -103,6 +103,12 @@
       "manual_power": {
         "name": "Moc ustawiana ręcznie"
       },
+      "charge_floor": {
+        "name": "Próg podtrzymania ładowania"
+      },
+      "charge_hold_window": {
+        "name": "Okno podtrzymania ładowania"
+      },
       "min_soc": {
         "name": "Minimalne SoC"
       },
@@ -122,6 +128,9 @@
       },
       "weighted_soc": {
         "name": "Ważony poziom baterii"
+      },
+      "setpoint": {
+        "name": "Wartość zadana"
       },
       "usable_energy": {
         "name": "Energia użyteczna"

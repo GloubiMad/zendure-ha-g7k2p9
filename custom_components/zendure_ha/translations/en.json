@@ -112,6 +112,12 @@
       "manual_power": {
         "name": "Manual Power"
       },
+      "charge_floor": {
+        "name": "Charge hold floor"
+      },
+      "charge_hold_window": {
+        "name": "Charge hold window"
+      },
       "min_soc": {
         "name": "SoC Minimum"
       },
@@ -128,6 +134,9 @@
       },
       "weighted_soc": {
         "name": "Weighted battery level"
+      },
+      "setpoint": {
+        "name": "Setpoint"
       },
       "usable_energy": {
         "name": "Usable energy"

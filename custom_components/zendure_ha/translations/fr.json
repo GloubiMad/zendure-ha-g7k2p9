@@ -102,6 +102,12 @@
       "manual_power": {
         "name": "Puissance manuelle"
       },
+      "charge_floor": {
+        "name": "Plancher de charge maintenue"
+      },
+      "charge_hold_window": {
+        "name": "Fenêtre de maintien de charge"
+      },
       "min_soc": {
         "name": "SOC minimum"
       },
@@ -118,6 +124,9 @@
       },
       "weighted_soc": {
         "name": "Niveau de batterie pondéré"
+      },
+      "setpoint": {
+        "name": "Consigne de distribution"
       },
       "usable_energy": {
         "name": "Énergie utilisable"

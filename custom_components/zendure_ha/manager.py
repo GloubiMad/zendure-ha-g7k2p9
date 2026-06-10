@@ -93,6 +93,11 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.produced = 0
         self.pwr_low = 0
 
+        # Maintien de charge anti cloud-flicker : tant que wall-clock < charge_hold_until,
+        # un creux bref (P1 repassé positif) maintient un plancher de charge au lieu de couper.
+        self.charge_hold_until = datetime.min
+        self.setpoint = 0  # dernier setpoint de distribution calculé (télémétrie)
+
     async def loadDevices(self) -> None:
         # Stamp the manager device with the integration's version before
         # creating its entities, so the device card shows the right version
@@ -126,6 +131,15 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         #  - usable_energy : Σ(énergie dispo) / Σ capacité × 100 → % utilisable au-dessus du SoC mini
         self.weightedSoc = ZendureSensor(self, "weighted_soc", None, "%", "battery", "measurement", 1)
         self.usableEnergy = ZendureSensor(self, "usable_energy", None, "%", None, "measurement", 1, icon="mdi:battery-arrow-down-outline")
+        self.setpointSensor = ZendureSensor(self, "setpoint", None, "W", "power", "measurement", 0)
+        # Maintien de charge anti cloud-flicker — réglables en direct, persistants :
+        #  - charge_floor : charge maintenue (W) pendant un creux bref ; 0 = désactivé
+        #  - charge_hold_window : durée (s) du maintien avant coupure réelle ; 0 = désactivé
+        self.chargeFloor = ZendureRestoreNumber(self, "charge_floor", None, None, "W", "power", 300, 0, NumberMode.BOX, True)
+        self.chargeHoldWindow = ZendureRestoreNumber(self, "charge_hold_window", None, None, "s", "duration", 300, 0, NumberMode.BOX, True)
+        # Défauts au 1er démarrage (50 W / 45 s) ; la valeur restaurée prend le dessus ensuite.
+        self.chargeFloor._attr_native_value = 50
+        self.chargeHoldWindow._attr_native_value = 45
 
         if self.config_entry is None:
             return
@@ -468,7 +482,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         if Path("simulation.csv").exists() is False:
             with Path("simulation.csv").open("w") as f:
                 f.write(
-                    "Time;P1;Operation;Battery;Solar;Home;SetPoint;--;"
+                    "Time;P1;Operation;Battery;Solar;Home;SetPoint;Hold;--;"
                     + ";".join(
                         [
                             f"bat;Prod;Home;{
@@ -504,7 +518,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 thome += (pwr_home := d.homeOutput.asInt - d.homeInput.asInt)
                 data += f";{pwr_battery};{pwr_solar};{pwr_home};{d.electricLevel.asInt}"
 
-            f.write(f"{time};{p1};{self.operation};{tbattery};{tsolar};{thome};{self.manualpower.asNumber};" + data + "\n")
+            hold = 1 if time < self.charge_hold_until else 0
+            f.write(f"{time};{p1};{self.operation};{tbattery};{tsolar};{thome};{self.setpoint};{hold};" + data + "\n")
 
     async def _p1_changed(self, event: Event[EventStateChangedData]) -> None:
         # exit if there is nothing to do
@@ -619,11 +634,27 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         # Update power distribution.
         _LOGGER.info("P1 ======> p1:%s isFast:%s, setpoint:%sW stored:%sW", p1, isFast, setpoint, self.produced)
+
+        # Télémétrie : mémorise le setpoint réel calculé (pour InfluxDB + simulation.csv).
+        self.setpoint = setpoint
+        self.setpointSensor.update_value(setpoint)
+
         match self.operation:
             case ManagerMode.MATCHING:
                 if setpoint < 0:
+                    # Surplus → charge. (Ré)arme la fenêtre de maintien : un creux
+                    # bref (nuage qui passe) ne coupera pas la charge tout de suite.
+                    self.charge_hold_until = time + timedelta(seconds=self.chargeHoldWindow.asInt)
                     await self.power_charge(setpoint, time)
+                elif (floor := self.chargeFloor.asInt) > 0 and time < self.charge_hold_until:
+                    # Creux bref juste après une charge : on maintient un plancher pour
+                    # garder l'appareil « chaud » (rampe immédiate au retour du soleil)
+                    # et NE PAS appeler power_discharge — ce qui évite le cooldown ~60 s
+                    # qui bloquerait la reprise et provoquerait de l'export réseau.
+                    # power_charge garde charge_time intact → reprise instantanée.
+                    await self.power_charge(-floor, time)
                 else:
+                    # Pas de charge récente, ou fenêtre expirée → comportement normal.
                     await self.power_discharge(setpoint)
 
             case ManagerMode.MATCHING_DISCHARGE:
