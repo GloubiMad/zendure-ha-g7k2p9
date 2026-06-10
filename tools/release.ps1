@@ -55,7 +55,7 @@ git push fork master
 git push fork $Version
 
 Write-Host "== 5/5 release GitHub ==" -ForegroundColor Cyan
-& $GhPath release create $Version --repo $ForkRepo --title $Version --notes $Notes $zip
+& $GhPath release create $Version --repo $ForkRepo --title $Version --notes $Notes --latest $zip
 
 Write-Host ""
 Write-Host "OK  Release $Version publiee. HACS te proposera la mise a jour." -ForegroundColor Green
