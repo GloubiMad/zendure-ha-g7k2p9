@@ -57,7 +57,12 @@
           "p1meter": "Capteur P1 pour le couplage intelligent",
           "mqttlog": "Journaliser communication MQTT",
           "auto_mqtt_user": "Gérer automatiquement les utilisateurs MQTT",
-          "notify_targets": "Cibles de notification pour les alertes (une ou plusieurs)"
+          "notify_targets": "Cibles de notification pour les alertes (une ou plusieurs)",
+          "influx_enable": "Exporter vers InfluxDB",
+          "influx_url": "URL InfluxDB (ex. http://homeassistant.local:8086)",
+          "influx_org": "Organisation InfluxDB",
+          "influx_token": "Jeton InfluxDB",
+          "influx_bucket": "Bucket InfluxDB"
         },
         "description": "Modifiez vos options.",
         "title": "Options de l'intégration Zendure"

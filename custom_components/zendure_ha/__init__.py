@@ -44,6 +44,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ZendureConfigEntry) -> b
     # retombaient silencieusement à False à chaque redémarrage/reload de HA.
     ZendureManager.simulation = entry.data.get(CONF_SIM, False)
     Api.mqttLogging = entry.data.get(CONF_MQTTLOG, False)
+    manager.configure_influx()
     await manager.loadDevices()
     entry.runtime_data = manager
     await manager.async_config_entry_first_refresh()
@@ -56,6 +57,7 @@ async def update_listener(_hass: HomeAssistant, entry: ZendureConfigEntry) -> No
     _LOGGER.debug("Updating Zendure config entry: %s", entry.entry_id)
     Api.mqttLogging = entry.data.get(CONF_MQTTLOG, False)
     ZendureManager.simulation = entry.data.get(CONF_SIM, False)
+    entry.runtime_data.configure_influx()
     entry.runtime_data.update_p1meter(entry.data.get(CONF_P1METER, "sensor.power_actual"))
 
 

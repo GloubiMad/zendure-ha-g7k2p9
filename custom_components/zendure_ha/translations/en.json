@@ -52,7 +52,12 @@
           "p1meter": "P1 Sensor for smart matching",
           "mqttlog": "Log MQTT communication",
           "auto_mqtt_user": "Automatically manage MQTT users",
-          "notify_targets": "Notification targets for alerts (choose one or more)"
+          "notify_targets": "Notification targets for alerts (choose one or more)",
+          "influx_enable": "Export to InfluxDB",
+          "influx_url": "InfluxDB URL (e.g. http://homeassistant.local:8086)",
+          "influx_org": "InfluxDB organization",
+          "influx_token": "InfluxDB token",
+          "influx_bucket": "InfluxDB bucket"
         },
         "description": "Amend your options.",
         "title": "Zendure Integration Options"

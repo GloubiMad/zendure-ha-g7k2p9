@@ -51,7 +51,12 @@
         "data": {
           "p1meter": "Czujnik P1 do inteligentnego dopasowania",
           "mqttlog": "Rejestruj komunikację MQTT",
-          "auto_mqtt_user": "Automatycznie zarządzaj użytkownikami MQTT"
+          "auto_mqtt_user": "Automatycznie zarządzaj użytkownikami MQTT",
+          "influx_enable": "Eksport do InfluxDB",
+          "influx_url": "Adres URL InfluxDB (np. http://homeassistant.local:8086)",
+          "influx_org": "Organizacja InfluxDB",
+          "influx_token": "Token InfluxDB",
+          "influx_bucket": "Bucket InfluxDB"
         },
         "description": "Zmień swoje opcje.",
         "title": "Opcje integracji Zendure"

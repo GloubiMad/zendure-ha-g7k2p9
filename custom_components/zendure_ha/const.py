@@ -21,6 +21,13 @@ CONF_AUTO_MQTT_USER = "auto_mqtt_user"
 CONF_TELEGRAM_ENTITY_ID = "telegram_entity_id"  # legacy, kept for migration
 CONF_NOTIFY_TARGETS = "notify_targets"  # list of notify.* entities for alerts
 
+# InfluxDB v2 exporter (dedicated bucket telemetry trace)
+CONF_INFLUX_ENABLE = "influx_enable"
+CONF_INFLUX_URL = "influx_url"
+CONF_INFLUX_ORG = "influx_org"
+CONF_INFLUX_TOKEN = "influx_token"
+CONF_INFLUX_BUCKET = "influx_bucket"
+
 CONF_HAKEY = "C*dafwArEOXK"
 
 

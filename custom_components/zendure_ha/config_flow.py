@@ -16,6 +16,11 @@ from .api import Api
 from .const import (
     CONF_APPTOKEN,
     CONF_AUTO_MQTT_USER,
+    CONF_INFLUX_BUCKET,
+    CONF_INFLUX_ENABLE,
+    CONF_INFLUX_ORG,
+    CONF_INFLUX_TOKEN,
+    CONF_INFLUX_URL,
     CONF_MQTTLOCAL,
     CONF_MQTTLOG,
     CONF_MQTTPORT,
@@ -180,6 +185,13 @@ class ZendureOptionsFlowHandler(OptionsFlow):
                 vol.Optional(CONF_NOTIFY_TARGETS, default=current_targets): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain="notify", multiple=True)
                 ),
+                vol.Optional(CONF_INFLUX_ENABLE, default=self.config_entry.data.get(CONF_INFLUX_ENABLE, False)): bool,
+                vol.Optional(CONF_INFLUX_URL, default=self.config_entry.data.get(CONF_INFLUX_URL, "")): str,
+                vol.Optional(CONF_INFLUX_ORG, default=self.config_entry.data.get(CONF_INFLUX_ORG, "")): str,
+                vol.Optional(CONF_INFLUX_TOKEN, default=self.config_entry.data.get(CONF_INFLUX_TOKEN, "")): selector.TextSelector(
+                    selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+                ),
+                vol.Optional(CONF_INFLUX_BUCKET, default=self.config_entry.data.get(CONF_INFLUX_BUCKET, "HA_ZENDURE")): str,
             }
         )
 

@@ -27,6 +27,11 @@ from homeassistant.loader import async_get_integration
 from .api import Api
 from .const import (
     CONF_AUTO_MQTT_USER,
+    CONF_INFLUX_BUCKET,
+    CONF_INFLUX_ENABLE,
+    CONF_INFLUX_ORG,
+    CONF_INFLUX_TOKEN,
+    CONF_INFLUX_URL,
     CONF_P1METER,
     DOMAIN,
     DeviceState,
@@ -97,6 +102,10 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         # un creux bref (P1 repassé positif) maintient un plancher de charge au lieu de couper.
         self.charge_hold_until = datetime.min
         self.setpoint = 0  # dernier setpoint de distribution calculé (télémétrie)
+        self.last_p1 = 0  # dernier P1 vu (télémétrie)
+
+        # Exporteur InfluxDB v2 (bucket dédié HA_ZENDURE) ; None si désactivé.
+        self.influx: Any = None
 
     async def loadDevices(self) -> None:
         # Stamp the manager device with the integration's version before
@@ -348,6 +357,11 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             self.weightedSoc.update_value(round(weighted_soc / kwh, 1))
             self.usableEnergy.update_value(round(max(0.0, usable_kwh) / kwh * 100, 1))
 
+        # Trace permanente vers InfluxDB (bucket dédié HA_ZENDURE), si configuré.
+        # Fire-and-forget : une panne/lenteur InfluxDB ne doit jamais retarder le pilotage.
+        if self.influx is not None:
+            self.hass.async_create_background_task(self._write_influx(time), "zendure_influx_write")
+
         # MQTT watchdog: paho's loop_start() is supposed to auto-reconnect,
         # but silent failures happen (broker drops the session, token rotates,
         # network blip the reconnect logic gives up on...). If we detect a
@@ -477,6 +491,73 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 self.p1_factor = 1000
         else:
             self.p1meterEvent = None
+
+    def configure_influx(self) -> None:
+        """(Re)crée le writer InfluxDB v2 depuis les options du config entry."""
+        self.influx = None
+        data = self.config_entry.data if self.config_entry is not None else {}
+        if not data.get(CONF_INFLUX_ENABLE) or not data.get(CONF_INFLUX_URL) or not data.get(CONF_INFLUX_TOKEN):
+            return
+        from .influx import ZendureInflux
+
+        bucket = data.get(CONF_INFLUX_BUCKET) or "HA_ZENDURE"
+        self.influx = ZendureInflux(self.hass, data[CONF_INFLUX_URL], data.get(CONF_INFLUX_ORG, ""), data[CONF_INFLUX_TOKEN], bucket)
+        _LOGGER.info("Zendure InfluxDB export enabled -> bucket %s", bucket)
+
+    async def _write_influx(self, now: datetime) -> None:
+        """Snapshot de tous les paramètres manager + appareils dans le bucket dédié."""
+        from .influx import line
+
+        points: list[str | None] = [
+            line(
+                "zendure_manager",
+                {},
+                {
+                    "p1": self.last_p1,
+                    "setpoint": self.setpoint,
+                    "hold_active": now < self.charge_hold_until,
+                    "operation": self.operation.name,
+                    "charge_floor": self.chargeFloor.asInt,
+                    "charge_hold_window": self.chargeHoldWindow.asInt,
+                    "power": self.power.asNumber,
+                    "available_kwh": self.availableKwh.asNumber,
+                    "total_kwh": self.totalKwh.asNumber,
+                    "weighted_soc": self.weightedSoc.asNumber,
+                    "usable_energy": self.usableEnergy.asNumber,
+                    "discharge_bypass": self.discharge_bypass,
+                    "charge_weight": self.charge_weight,
+                    "discharge_weight": self.discharge_weight,
+                    "produced": self.produced,
+                },
+            )
+        ]
+        for d in self.devices:
+            points.append(
+                line(
+                    "zendure_device",
+                    {"device": d.name},
+                    {
+                        "soc": d.electricLevel.asInt,
+                        "kwh": d.kWh,
+                        "available_kwh": d.availableKwh.asNumber,
+                        "pwr_battery": d.batteryOutput.asInt - d.batteryInput.asInt,
+                        "solar": d.solarInput.asInt,
+                        "home_out": d.homeOutput.asInt,
+                        "home_in": d.homeInput.asInt,
+                        "pwr_produced": d.pwr_produced,
+                        "pwr_offgrid": d.pwr_offgrid,
+                        "pwr_max": d.pwr_max,
+                        "charge_limit": d.charge_limit,
+                        "discharge_limit": d.discharge_limit,
+                        "min_soc": d.minSoc.asNumber,
+                        "soc_set": d.socSet.asNumber,
+                        "exports_bypass": d.exports_bypass,
+                        "bypass": d.byPass.asInt,
+                        "state": d.state.name,
+                    },
+                )
+            )
+        await self.influx.write([p for p in points if p])
 
     def writeSimulation(self, time: datetime, p1: int) -> None:
         if Path("simulation.csv").exists() is False:
@@ -635,7 +716,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         # Update power distribution.
         _LOGGER.info("P1 ======> p1:%s isFast:%s, setpoint:%sW stored:%sW", p1, isFast, setpoint, self.produced)
 
-        # Télémétrie : mémorise le setpoint réel calculé (pour InfluxDB + simulation.csv).
+        # Télémétrie : mémorise P1 et le setpoint réel calculé (pour InfluxDB + simulation.csv).
+        self.last_p1 = p1
         self.setpoint = setpoint
         self.setpointSensor.update_value(setpoint)
 

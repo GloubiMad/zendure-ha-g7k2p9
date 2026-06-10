@@ -53,7 +53,12 @@
         "data": {
           "scan_interval": "Scaninterval (seconden)",
           "auto_mqtt_user": "MQTT-gebruikers automatisch beheren",
-          "notify_targets": "Meldingsdoelen voor waarschuwingen (een of meer)"
+          "notify_targets": "Meldingsdoelen voor waarschuwingen (een of meer)",
+          "influx_enable": "Exporteren naar InfluxDB",
+          "influx_url": "InfluxDB-URL (bijv. http://homeassistant.local:8086)",
+          "influx_org": "InfluxDB-organisatie",
+          "influx_token": "InfluxDB-token",
+          "influx_bucket": "InfluxDB-bucket"
         },
         "description": "Pas je opties aan.",
         "title": "Zendure Integratie Opties"
