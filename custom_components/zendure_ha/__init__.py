@@ -39,6 +39,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ZendureConfigEntry) -> b
         EntityDevice.checkEntity = await hass.async_add_executor_job(EntityDevice._load_check_entity_map)
 
     manager = ZendureManager(hass, entry)
+    # Charge les flags runtime au démarrage : update_listener ne s'exécute QUE lors
+    # d'une sauvegarde d'options, donc sans ceci le mode simulation (et le logging MQTT)
+    # retombaient silencieusement à False à chaque redémarrage/reload de HA.
+    ZendureManager.simulation = entry.data.get(CONF_SIM, False)
+    Api.mqttLogging = entry.data.get(CONF_MQTTLOG, False)
     await manager.loadDevices()
     entry.runtime_data = manager
     await manager.async_config_entry_first_refresh()
