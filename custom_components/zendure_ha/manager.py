@@ -746,9 +746,12 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         match self.operation:
             case ManagerMode.MATCHING:
                 if setpoint < 0:
-                    # Surplus → charge. (Ré)arme la fenêtre de maintien : un creux
-                    # bref (nuage qui passe) ne coupera pas la charge tout de suite.
-                    self.charge_hold_until = time + timedelta(seconds=self.chargeHoldWindow.asInt)
+                    # Surplus → charge. (Ré)arme la fenêtre de maintien UNIQUEMENT si une
+                    # charge est réellement en cours : sinon un micro-export d'un seul
+                    # cycle pendant une DÉCHARGE (yo-yo) armait la fenêtre et retenait le
+                    # système en mode charge pendant 45-60 s alors que la maison importait.
+                    if self.charge:
+                        self.charge_hold_until = time + timedelta(seconds=self.chargeHoldWindow.asInt)
                     await self.power_charge(setpoint, time)
                 elif (floor := self.chargeFloor.asInt) > 0 and time < self.charge_hold_until:
                     # Creux bref juste après une charge : on maintient un plancher pour
@@ -779,8 +782,10 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 elif setpoint > 0:
                     await self.power_discharge(0)
                 else:
-                    # Charge sur surplus → (ré)arme la fenêtre de maintien.
-                    self.charge_hold_until = time + timedelta(seconds=self.chargeHoldWindow.asInt)
+                    # Charge sur surplus → (ré)arme la fenêtre seulement si une charge
+                    # est réellement en cours (même garde que MATCHING).
+                    if self.charge:
+                        self.charge_hold_until = time + timedelta(seconds=self.chargeHoldWindow.asInt)
                     await self.power_charge(min(0, setpoint), time)
 
             case ManagerMode.MANUAL:
