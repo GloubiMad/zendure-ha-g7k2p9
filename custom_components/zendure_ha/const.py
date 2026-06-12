@@ -72,7 +72,12 @@ class SmartMode:
 
     # Standard deviation thresholds for detecting significant changes
     P1_STDDEV_FACTOR = 3.5  # Multiplier for P1 meter stddev calculation
-    P1_STDDEV_MIN = 15  # Minimum stddev value for P1 changes (watts)
+    # 15 -> 30 : seuil plancher de "changement significatif" du P1. À 15 W, le
+    # bruit du compteur déclenchait des redistributions rapides en boucle
+    # (sur-correction ±200 W période ~10 s autour du point d'équilibre,
+    # micro-exports qui basculaient charge/décharge). À 30 W, les
+    # micro-variations passent par le chemin lent (TIMEZERO) au lieu du fast.
+    P1_STDDEV_MIN = 30  # Minimum stddev value for P1 changes (watts)
     P1_MIN_UPDATE = timedelta(milliseconds=400)
     SETPOINT_STDDEV_FACTOR = 5.0  # Multiplier for power average stddev calculation
     SETPOINT_STDDEV_MIN = 50  # Minimum stddev value for power average (watts)
