@@ -700,7 +700,12 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     self.discharge.append(d)
                     self.discharge_bypass -= d.pwr_produced if d.state == DeviceState.SOCFULL and d.exports_bypass else 0
                     self.discharge_limit += d.fuseGrp.discharge_limit(d)
-                    self.discharge_optimal += d.discharge_optimal
+                    # Un SOCFULL ne peut fournir que son solaire (déjà compté via
+                    # discharge_produced) : power_discharge clampe son pwr à
+                    # -pwr_produced. Compter sa capacité batterie ici gonflait le
+                    # seuil dev_start (~600 W) et empêchait de redémarrer un device
+                    # idle alors que la maison importait 300-500 W.
+                    self.discharge_optimal += d.discharge_optimal if d.state != DeviceState.SOCFULL else 0
                     self.discharge_produced -= d.pwr_produced
                     self.discharge_weight += d.pwr_max * d.electricLevel.asInt
                     setpoint += home
