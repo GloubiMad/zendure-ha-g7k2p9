@@ -44,6 +44,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ZendureConfigEntry) -> b
     # retombaient silencieusement à False à chaque redémarrage/reload de HA.
     ZendureManager.simulation = entry.data.get(CONF_SIM, False)
     Api.mqttLogging = entry.data.get(CONF_MQTTLOG, False)
+    _LOGGER.info("Zendure flags: simulation=%s mqttLogging=%s", ZendureManager.simulation, Api.mqttLogging)
     manager.configure_influx()
     await manager.loadDevices()
     entry.runtime_data = manager

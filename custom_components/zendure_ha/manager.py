@@ -561,8 +561,11 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         await self.influx.write([p for p in points if p])
 
     def writeSimulation(self, time: datetime, p1: int) -> None:
-        if Path("simulation.csv").exists() is False:
-            with Path("simulation.csv").open("w") as f:
+        # Chemin explicite dans /config (le CWD de HA n'est pas garanti).
+        path = Path(self.hass.config.path("simulation.csv"))
+        if path.exists() is False:
+            _LOGGER.info("Creating simulation log: %s", path)
+            with path.open("w") as f:
                 f.write(
                     "Time;P1;Operation;Battery;Solar;Home;SetPoint;Hold;--;"
                     + ";".join(
@@ -588,7 +591,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     + "\n"
                 )
 
-        with Path("simulation.csv").open("a") as f:
+        with path.open("a") as f:
             data = ""
             tbattery = 0
             tsolar = 0
@@ -618,7 +621,13 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         # Get time & update simulation
         time = datetime.now()
         if ZendureManager.simulation:
-            self.writeSimulation(time, p1)
+            # Ne jamais laisser un souci d'écriture tuer la boucle P1 ; log explicite
+            # (avant, une exception ici échouait sans message clair et le fichier
+            # semblait simplement « ne pas se créer »).
+            try:
+                self.writeSimulation(time, p1)
+            except Exception as err:  # pylint: disable=broad-except
+                _LOGGER.error("simulation.csv write failed: %s", err)
 
         # Check for fast delay
         if time < self.zero_fast:
