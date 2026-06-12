@@ -554,6 +554,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                         "exports_bypass": d.exports_bypass,
                         "bypass": d.byPass.asInt,
                         "state": d.state.name,
+                        "connection": d.connectionStatus.asInt,
                     },
                 )
             )
@@ -566,7 +567,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     "Time;P1;Operation;Battery;Solar;Home;SetPoint;Hold;--;"
                     + ";".join(
                         [
-                            f"bat;Prod;Home;{
+                            f"bat;Prod;Home;Soc;Conn;ChLim;{
                                 json.dumps(
                                     DeviceSettings(
                                         d.name,
@@ -597,7 +598,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 tbattery += (pwr_battery := d.batteryOutput.asInt - d.batteryInput.asInt)
                 tsolar += (pwr_solar := d.solarInput.asInt)
                 thome += (pwr_home := d.homeOutput.asInt - d.homeInput.asInt)
-                data += f";{pwr_battery};{pwr_solar};{pwr_home};{d.electricLevel.asInt}"
+                # Conn = connectionStatus (10=Cloud, 11=Local, 12=zenSDK, <10=pas connecté)
+                # + charge_limit pour voir un clamp rapporté par l'appareil (ex. blocage à -250).
+                data += f";{pwr_battery};{pwr_solar};{pwr_home};{d.electricLevel.asInt};{d.connectionStatus.asInt};{d.charge_limit}"
 
             hold = 1 if time < self.charge_hold_until else 0
             f.write(f"{time};{p1};{self.operation};{tbattery};{tsolar};{thome};{self.setpoint};{hold};" + data + "\n")
