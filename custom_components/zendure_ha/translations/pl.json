@@ -137,6 +137,9 @@
       "setpoint": {
         "name": "Wartość zadana"
       },
+      "home_power_net": {
+        "name": "Zasilanie domu (netto)"
+      },
       "usable_energy": {
         "name": "Energia użyteczna"
       },

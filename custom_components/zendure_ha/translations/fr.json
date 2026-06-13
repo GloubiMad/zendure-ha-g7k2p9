@@ -134,6 +134,9 @@
       "setpoint": {
         "name": "Consigne de distribution"
       },
+      "home_power_net": {
+        "name": "Injection maison (nette)"
+      },
       "usable_energy": {
         "name": "Énergie utilisable"
       },

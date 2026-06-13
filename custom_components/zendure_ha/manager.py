@@ -77,6 +77,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         # MQTT staleness watchdog bookkeeping (keyed by deviceId)
         self._last_msg: dict[str, datetime] = {}  # real wall-clock time of last message
         self._resubscribe_after: dict[str, datetime] = {}  # cooldown gate per device
+        self._started = datetime.now()  # boot ref to recover never-seen devices
 
         self.charge: list[ZendureDevice] = []
         self.charge_limit = 0
@@ -135,6 +136,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.availableKwh = ZendureSensor(self, "available_kwh", None, "kWh", "energy_storage", None, 1)
         self.totalKwh = ZendureSensor(self, "total_kwh", None, "kWh", "energy_storage", "measurement", 2)
         self.power = ZendureSensor(self, "power", None, "W", "power", "measurement", 0)
+        # Injection nette du parc dans la maison = Σ(homeOutput − homeInput).
+        self.homePowerNet = ZendureSensor(self, "home_power_net", None, "W", "power", "measurement", 0)
         # Agrégats de parc pondérés par la capacité (recalculés à chaque update()):
         #  - weighted_soc : Σ(capacité × niveau) / Σ capacité → vrai SoC moyen %
         #  - usable_energy : Σ(énergie dispo) / Σ capacité × 100 → % utilisable au-dessus du SoC mini
@@ -441,6 +444,29 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             if (msg_time := self._last_msg.get(device.deviceId)) is not None:
                 silence[device.deviceId] = (now - msg_time).total_seconds()
 
+        # Cold-start blind spot: a device never seen since boot keeps
+        # lastseen == datetime.min (and device.mqtt None), so it never enters the
+        # silence map above and the watchdog could not recover it -> it stayed
+        # "unknown" until a manual reset (observed on a full battery in rest mode
+        # at boot, while the other device was fine). If still unseen well past
+        # startup, its subscription likely did not establish (connect race, or
+        # device silent at boot); re-subscribe it on BOTH shared clients since no
+        # message has revealed which broker it uses. Throttled per device.
+        if (now - self._started).total_seconds() >= SmartMode.MQTT_STALE_TIMEOUT:
+            for device in self.devices:
+                if device.lastseen != datetime.min:
+                    continue  # already seen -> handled by the normal path below
+                if (until := self._resubscribe_after.get(device.deviceId)) is not None and now < until:
+                    continue
+                _LOGGER.warning("Device %s never seen since startup; re-subscribing on cloud+local", device.name)
+                for client in (Api.mqttCloud, Api.mqttLocal):
+                    try:
+                        if client is not None and client.is_connected():
+                            Api.subscribeDevice(client, device)
+                    except Exception as err:  # pylint: disable=broad-except
+                        _LOGGER.error("Cold-start re-subscribe of %s failed: %s", device.name, err)
+                self._resubscribe_after[device.deviceId] = now + timedelta(seconds=SmartMode.MQTT_RESUB_COOLDOWN)
+
         if not silence:
             return
 
@@ -679,6 +705,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         availableKwh = 0
         setpoint = p1
         power = 0
+        home_net = 0  # Σ(homeOutput − homeInput) = injection NETTE du parc dans la maison
 
         for d in self.devices:
             if await d.power_get():
@@ -717,9 +744,15 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
                 availableKwh += d.actualKwh
                 power += d.pwr_offgrid + home + d.pwr_produced
+                # Injection nette : ce que le parc envoie réellement à la maison.
+                # Corrige le piège « glagla full bypass ses PV pendant que up
+                # recharge en AC » : la somme des homeOutput dirait 1200, mais up
+                # réabsorbe via homeInput -> net réel ≈ 0.
+                home_net += d.homeOutput.asInt - d.homeInput.asInt
 
         # Update the power entities
         self.power.update_value(power)
+        self.homePowerNet.update_value(home_net)
         self.availableKwh.update_value(availableKwh)
 
         # discharge_bypass accumulates the solar-only power produced by SOCFULL devices.

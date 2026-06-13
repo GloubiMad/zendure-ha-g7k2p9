@@ -144,6 +144,9 @@
       "setpoint": {
         "name": "Setpoint"
       },
+      "home_power_net": {
+        "name": "Home injection (net)"
+      },
       "usable_energy": {
         "name": "Usable energy"
       },

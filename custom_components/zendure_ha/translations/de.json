@@ -133,6 +133,9 @@
       "setpoint": {
         "name": "Sollwert"
       },
+      "home_power_net": {
+        "name": "Hauseinspeisung (netto)"
+      },
       "usable_energy": {
         "name": "Nutzbare Energie"
       },

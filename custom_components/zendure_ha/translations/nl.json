@@ -130,6 +130,9 @@
       "setpoint": {
         "name": "Streefwaarde"
       },
+      "home_power_net": {
+        "name": "Huisinjectie (netto)"
+      },
       "usable_energy": {
         "name": "Bruikbare energie"
       },
