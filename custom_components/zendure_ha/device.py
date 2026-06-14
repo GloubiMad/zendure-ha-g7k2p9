@@ -135,6 +135,9 @@ class ZendureDevice(EntityDevice):
         self.actualKwh: float = 0.0
         self.state: DeviceState = DeviceState.OFFLINE
         self.exports_bypass: bool = True
+        # Dernière consigne nette demandée par le manager (signée : <0 charge, >0 décharge),
+        # mémorisée AVANT le clamp interne -> sert au watchdog de commande (figé).
+        self.cmd_target: int = 0
 
         self.create_entities()
 
@@ -655,6 +658,7 @@ class ZendureDevice(EntityDevice):
 
     async def power_charge(self, power: int) -> int:
         """Set charge power."""
+        self.cmd_target = power  # intention manager (avant clamp) pour le watchdog de commande
         power = min(0, max(power, self.charge_limit))
         """power is here a negative value, but homeInput and homeOutput are always positive"""
         if abs(power + self.homeInput.asInt - self.homeOutput.asInt) <= SmartMode.POWER_TOLERANCE:
@@ -668,6 +672,7 @@ class ZendureDevice(EntityDevice):
 
     async def power_discharge(self, power: int) -> int:
         """Set discharge power."""
+        self.cmd_target = power  # intention manager (avant clamp) pour le watchdog de commande
         power = max(0, min(power, self.discharge_limit))
         if abs(power - self.homeOutput.asInt + self.homeInput.asInt) <= SmartMode.POWER_TOLERANCE:
             _LOGGER.info("Power discharge %s => no action [power %s]", self.name, power)

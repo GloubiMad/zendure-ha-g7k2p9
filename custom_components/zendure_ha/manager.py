@@ -108,6 +108,13 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         # Exporteur InfluxDB v2 (bucket dédié HA_ZENDURE) ; None si désactivé.
         self.influx: Any = None
 
+        # Watchdog de COMMANDE (figé) — état par deviceId. Détecte un onduleur qui
+        # reste vivant sur MQTT mais n'applique plus les consignes (déblocage seulement
+        # par reboot matériel). Voir _check_command_followed / SmartMode.CMD_STUCK_*.
+        self._cmd_realized: dict[str, int] = {}  # dernier réalisé vu (détection "figé")
+        self._cmd_stuck: dict[str, int] = {}  # nb de cycles consécutifs non suivis
+        self._cmd_notified_after: dict[str, datetime] = {}  # cooldown notif par device
+
     async def loadDevices(self) -> None:
         # Stamp the manager device with the integration's version before
         # creating its entities, so the device card shows the right version
@@ -700,6 +707,77 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             self.zero_next = time + timedelta(seconds=SmartMode.TIMEZERO)
             self.zero_fast = time + timedelta(seconds=SmartMode.TIMEFAST)
 
+    def _check_command_followed(self, now: datetime) -> None:
+        """Watchdog de commande : alerte si un onduleur se fige (ne suit plus la consigne).
+
+        Compare la consigne du cycle précédent (``d.cmd_target``, posée par
+        power_charge/power_discharge AVANT clamp) au réalisé (homeOutput - homeInput).
+        Déclenche si, sur CMD_STUCK_CYCLES cycles d'affilée : device en ligne, capable
+        de bouger dans le sens demandé, consigne réellement demandée (|consigne| >
+        CMD_STUCK_GAP), écart |consigne - réalisé| > CMD_STUCK_GAP, et réalisé FIGÉ
+        (variation ≤ CMD_STUCK_FREEZE). Une notif puis cooldown.
+
+        Orthogonal au watchdog MQTT : ici le device PARLE encore (lastseen frais) mais
+        n'OBÉIT plus — cas 137 W décharge / -250 W charge, déblocage par reboot matériel.
+        Ne se déclenche jamais sur un device qu'on ne sollicite pas (consigne ≈ 0 : repos,
+        ou bypass solaire d'un device plein laissé tranquille pendant une charge).
+        """
+        for d in self.devices:
+            realized = d.homeOutput.asInt - d.homeInput.asInt
+            prev = self._cmd_realized.get(d.deviceId)
+            self._cmd_realized[d.deviceId] = realized
+
+            target = d.cmd_target
+            frozen = prev is not None and abs(realized - prev) <= SmartMode.CMD_STUCK_FREEZE
+            # capable : on ne reproche pas à un device plein de ne pas charger, ni à un
+            # device vide de ne pas décharger (refus légitime, pas un blocage firmware).
+            capable = not (target < 0 and d.state == DeviceState.SOCFULL) and not (target > 0 and d.state == DeviceState.SOCEMPTY)
+            # On n'alerte QUE si on demande réellement une puissance significative. Un device
+            # à consigne ~0 (repos, ou bypass solaire laissé tranquille pendant une charge :
+            # cmd_target reste 0 alors qu'il passe son PV) ne doit jamais déclencher.
+            requested = abs(target) > SmartMode.CMD_STUCK_GAP
+            stuck = d.online and capable and requested and abs(target - realized) > SmartMode.CMD_STUCK_GAP and frozen
+
+            if not stuck:
+                self._cmd_stuck[d.deviceId] = 0
+                continue
+
+            count = self._cmd_stuck.get(d.deviceId, 0) + 1
+            self._cmd_stuck[d.deviceId] = count
+            if count < SmartMode.CMD_STUCK_CYCLES:
+                continue
+
+            until = self._cmd_notified_after.get(d.deviceId)
+            if until is not None and now < until:
+                continue
+            self._cmd_notified_after[d.deviceId] = now + timedelta(seconds=SmartMode.CMD_STUCK_COOLDOWN)
+            _LOGGER.warning(
+                "Onduleur figé: %s consigne %sW / réalisé %sW figé depuis %s cycles — reboot matériel probable",
+                d.name,
+                target,
+                realized,
+                count,
+            )
+            self.hass.async_create_background_task(
+                self._notify_command_stuck(d.name, target, realized), "zendure_cmd_stuck"
+            )
+
+    async def _notify_command_stuck(self, name: str, target: int, realized: int) -> None:
+        """Pousse la notif 'onduleur figé' vers les cibles configurées (fire-and-forget)."""
+        from .api import Api
+
+        message = (
+            f"{name} ne suit plus la consigne : demandé {target} W, réalisé {realized} W (figé). "
+            "L'onduleur reste vivant sur MQTT mais ignore les commandes — un redémarrage matériel "
+            "(débrancher/rebrancher l'onduleur) est probablement nécessaire."
+        )
+        if not Api.notify_targets or not self.hass.services.has_service("notify", "send_message"):
+            _LOGGER.warning("Onduleur figé (%s) : aucune cible de notification configurée — %s", name, message)
+            return
+        from .notifications import async_notify_targets
+
+        await async_notify_targets(self.hass, Api.notify_targets, "Zendure — Onduleur figé", message)
+
     async def powerChanged(self, p1: int, isFast: bool, time: datetime) -> None:
         """Return the distribution setpoint."""
         availableKwh = 0
@@ -755,6 +833,12 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.homePowerNet.update_value(home_net)
         self.availableKwh.update_value(availableKwh)
 
+        # Watchdog de commande : compare la consigne posée au cycle précédent (d.cmd_target)
+        # au réalisé qu'on vient de lire. Uniquement dans les modes qui pilotent réellement
+        # (en OFF/MONITOR on n'envoie aucune commande -> rien à surveiller).
+        if self.operation not in (ManagerMode.OFF, ManagerMode.MONITOR):
+            self._check_command_followed(time)
+
         # discharge_bypass accumulates the solar-only power produced by SOCFULL devices.
         # Subtract it from setpoint to avoid over-discharging from grid, but clamp so
         # setpoint never goes below 0 when p1 >= 0: a SOCFULL device producing solar
@@ -775,6 +859,12 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.last_p1 = p1
         self.setpoint = setpoint
         self.setpointSensor.update_value(setpoint)
+
+        # Watchdog de commande : on repart de 0 pour CE cycle. La distribution ci-dessous
+        # (re)pose d.cmd_target sur chaque device qu'elle pilote ; ceux qu'on ne sollicite
+        # pas restent donc à "consigne 0" -> écart nul -> jamais d'alerte au repos.
+        for d in self.devices:
+            d.cmd_target = 0
 
         match self.operation:
             case ManagerMode.MATCHING:

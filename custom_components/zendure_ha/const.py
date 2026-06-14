@@ -102,3 +102,18 @@ class SmartMode:
     MQTT_STALE_TIMEOUT = 150  # seconds of silence before re-subscribing a device
     MQTT_RECONNECT_TIMEOUT = 420  # total-blackout silence before forcing a reconnect
     MQTT_RESUB_COOLDOWN = 120  # minimum seconds between recovery actions per device
+
+    # Watchdog de COMMANDE (orthogonal au watchdog MQTT) : un onduleur peut rester
+    # vivant sur MQTT (lastseen frais) tout en IGNORANT les commandes — le firmware
+    # se fige sur une valeur (incidents vécus : -250 W en charge, 137 W en décharge)
+    # et seul un reboot matériel (débranchement) le débloque. On compare la consigne
+    # envoyée (cmd_target) au réalisé (homeOutput - homeInput) : si l'écart dépasse
+    # CMD_STUCK_GAP ET que le réalisé reste figé (variation ≤ CMD_STUCK_FREEZE) pendant
+    # CMD_STUCK_CYCLES cycles consécutifs, on notifie une fois (puis cooldown).
+    # NB : ne se déclenche QUE si on demande réellement une puissance (écart > seuil) ;
+    # un device au repos à 0 W parce qu'on ne lui demande rien (ex. glagla plein,
+    # export interdit) a un écart nul → jamais d'alerte.
+    CMD_STUCK_GAP = 150  # W d'écart consigne/réalisé considéré comme "non suivi"
+    CMD_STUCK_FREEZE = 20  # W de variation max du réalisé entre 2 cycles pour le dire "figé"
+    CMD_STUCK_CYCLES = 6  # cycles consécutifs figés avant alerte (~30-40 s)
+    CMD_STUCK_COOLDOWN = 1800  # s minimum entre 2 notifs pour un même device
