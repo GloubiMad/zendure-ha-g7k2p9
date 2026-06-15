@@ -87,6 +87,14 @@ Ajouter un select manager `regulation_engine` (`legacy` défaut / `smooth`) :
 - **Cadence** : zoic21 = 2 s fixe ; nous = event-driven sur changement de P1. Choisir (probablement timer 2 s + dernier P1).
 - **Deadband saisonnier** : exposer en option (comme `charge_floor`) ou auto.
 
+## 6bis. Décisions de design (réflexion 15/06 — structurantes)
+Mesure clé : sur la capture cloud 24 h, le cloud **récupère d'un sur-débit en ~5-6 s** (médiane 5, max 6) et ne laisse **jamais l'export dépasser ~280 W** (≈ ~4 s de réponse matérielle + 1-2 cycles → **hardware-limited**). Un EMA symétrique naïf ferait ~12-16 s / jusqu'à 2400 W → **inacceptable**. D'où :
+
+1. **Réponse ASYMÉTRIQUE (magnitude)** : **reculer (vers 0) = RAPIDE** (1-2 cycles, fast-path, on ne fait pas mieux que le ~4 s matériel) ; **avancer (loin de 0) = LENT/lissé** (EMA + rate-limiter, anti-yo-yo). Vaut dans les **deux modes** (réduire un débit OU une charge = rapide).
+2. **Loi à 2 vitesses + flip relais GARDÉ** : le **flip de mode charge↔décharge** (acMode 1↔2 = claquement relais) ne se fait **que sur demande opposée CONFIRMÉE soutenue** (hysteresis/direction-guard), **jamais sur un transitoire**, **symétrique** dans les deux sens. → subsume notre fast-down décharge **et** le patch relais zoic21 (côté charge) en **une seule règle** : *recule vite, avance doucement, ne flippe que sur confirmation.*
+3. **État « neutre armé » = rester dans le mode courant à magnitude mini** (`discharge(x)` ou `charge(x)`, acMode tenu) → ré-engagement **instantané**, **zéro claquement**, recalcul tranquille depuis ce point. **Vérifier** : à `power==0` le code force `smartMode:0` (device.py:798/791) — si ça **ouvre** le relais, armer à **~50 W** (`POWER_START`) comme keep-alive, ou commande de maintien `smartMode:1, acMode:<courant>, outputLimit/inputLimit:0`.
+4. **Biais ANTI-EXPORT (deadband shift)** : cible de régulation = **P1 = +ε (léger import)**, pas 0 → le bruit oscille dans le positif, **ne franchit jamais 0 vers l'export**. = le **deadband shift** zoic21, **configurable**. NB : le cloud mesuré biaisait **−12 W** (léger *export*, toléré par Zendure) ; **nous on veut l'inverse** (biais **+**, no-export, pas de tarif rachat) → coût = petit import permanent de quelques W, **assumé**. Complète le select `no_export` (forbidden) : 2 garde-fous (cible de régul + redirection surplus).
+
 ## 7. Validation finale
 - `simulation` ON sur plusieurs jours, recalculer les stats baseline (P1 distrib, `|Δ|/cycle`, granularité) et **comparer au cloud**.
 - Vérifier les cas limites : glagla full + forbidden (no_export), up qui décroche (le moteur ne doit pas s'emballer), faible soleil (plus de yo-yo 0↔50).
