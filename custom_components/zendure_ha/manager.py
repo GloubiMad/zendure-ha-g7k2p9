@@ -159,6 +159,12 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         # Défauts au 1er démarrage (50 W / 45 s) ; la valeur restaurée prend le dessus ensuite.
         self.chargeFloor._attr_native_value = 50
         self.chargeHoldWindow._attr_native_value = 45
+        # Stratégie quand un device est à SoC plein : que faire de son surplus solaire.
+        #  - full_solar (défaut) : comportement actuel — passe tout ; peut exporter si non absorbé.
+        #  - no_export : zéro export réseau → le surplus est crédité pour être ENCAISSÉ par l'autre
+        #    batterie (utile pour un device en gridReverse=forbidden). Phase 2 à venir : écrêter si
+        #    l'autre batterie est pleine aussi. Défaut full_solar → aucun changement tant qu'on ne choisit pas.
+        self.socFullStrategy = ZendureRestoreSelect(self, "soc_full_strategy", {0: "full_solar", 1: "no_export"}, None, 0)
 
         if self.config_entry is None:
             return
@@ -803,7 +809,14 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 # SOCEMPTY means, it could not discharge the battery, but it is still possible to feed into the home using solarpower or offGrid
                 elif (home := d.homeOutput.asInt) > 0:
                     self.discharge.append(d)
-                    self.discharge_bypass -= d.pwr_produced if d.state == DeviceState.SOCFULL and d.exports_bypass else 0
+                    # Crédit du solaire passthrough d'un SOCFULL, cappé à son homeOutput réel
+                    # (approche zoic21 patch-2 : pwr_produced peut dépasser homeOutput → sur-crédit
+                    # → setpoint négatif fantôme = vraie cause de #1151). On l'étend aux devices
+                    # FORBIDDEN quand la stratégie SoC plein = no_export, pour que leur surplus soit
+                    # encaissé par l'autre batterie au lieu de partir au réseau. La compensation
+                    # (plus bas, gardée sur p1<0) ne s'applique donc qu'en export → stockage du surplus.
+                    if d.state == DeviceState.SOCFULL and (d.exports_bypass or self.socFullStrategy.value == SmartMode.STRAT_NO_EXPORT):
+                        self.discharge_bypass += min(-d.pwr_produced, home)
                     self.discharge_limit += d.fuseGrp.discharge_limit(d)
                     # Un SOCFULL ne peut fournir que son solaire (déjà compté via
                     # discharge_produced) : power_discharge clampe son pwr à

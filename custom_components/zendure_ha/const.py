@@ -117,3 +117,8 @@ class SmartMode:
     CMD_STUCK_FREEZE = 20  # W de variation max du réalisé entre 2 cycles pour le dire "figé"
     CMD_STUCK_CYCLES = 6  # cycles consécutifs figés avant alerte (~30-40 s)
     CMD_STUCK_COOLDOWN = 1800  # s minimum entre 2 notifs pour un même device
+
+    # Stratégie SoC plein (select manager) : que fait un device plein de son surplus solaire.
+    STRAT_FULL_SOLAR = 0  # actuel : passe tout son solaire (peut exporter si non absorbé)
+    STRAT_NO_EXPORT = 1  # zéro export réseau : surplus crédité -> encaissé par l'autre batterie
+    #                      (phase 2 à venir : écrêter la sortie si l'autre batterie est pleine aussi)

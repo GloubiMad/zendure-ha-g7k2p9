@@ -394,6 +394,13 @@
       }
     },
     "select": {
+      "soc_full_strategy": {
+        "name": "Full SoC strategy",
+        "state": {
+          "full_solar": "Full solar (current)",
+          "no_export": "No grid export (store in other battery)"
+        }
+      },
       "ac_mode": {
         "name": "AC Operation Mode",
         "state": {

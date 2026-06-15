@@ -383,6 +383,13 @@
       }
     },
     "select": {
+      "soc_full_strategy": {
+        "name": "Strategie bei vollem SoC",
+        "state": {
+          "full_solar": "Volle Solarleistung (aktuell)",
+          "no_export": "Keine Netzeinspeisung (in andere Batterie speichern)"
+        }
+      },
       "ac_mode": {
         "name": "AC-Betriebsmodus",
         "state": {

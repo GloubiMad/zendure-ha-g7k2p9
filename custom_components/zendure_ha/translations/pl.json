@@ -385,6 +385,13 @@
       }
     },
     "select": {
+      "soc_full_strategy": {
+        "name": "Strategia przy pełnym SoC",
+        "state": {
+          "full_solar": "Pełne słońce (obecne)",
+          "no_export": "Brak eksportu do sieci (magazynuj w drugiej baterii)"
+        }
+      },
       "ac_mode": {
         "name": "Tryb pracy AC",
         "state": {

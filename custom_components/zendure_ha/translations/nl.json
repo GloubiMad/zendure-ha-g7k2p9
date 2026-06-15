@@ -307,6 +307,13 @@
       }
     },
     "select": {
+      "soc_full_strategy": {
+        "name": "Strategie bij volle SoC",
+        "state": {
+          "full_solar": "Volledige zon (huidig)",
+          "no_export": "Geen netinjectie (opslaan in andere batterij)"
+        }
+      },
       "ac_mode": {
         "name": "AC Bedrijfsmodus",
         "state": {
