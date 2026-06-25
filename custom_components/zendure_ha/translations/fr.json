@@ -56,7 +56,13 @@
           "scan_interval": "Intervalle d'analyse (secondes)",
           "p1meter": "Capteur P1 pour le couplage intelligent",
           "mqttlog": "Journaliser communication MQTT",
-          "auto_mqtt_user": "Gérer automatiquement les utilisateurs MQTT"
+          "auto_mqtt_user": "Gérer automatiquement les utilisateurs MQTT",
+          "simulation": "Journal simulation.csv (analyse régulation)",
+          "influx_enable": "Activer la connexion InfluxDB",
+          "influx_url": "InfluxDB — URL (http://host:8086)",
+          "influx_org": "InfluxDB — Organisation",
+          "influx_token": "InfluxDB — Token (write)",
+          "mqtt_influx": "Journaliser le MQTT brut vers InfluxDB (bucket zendure_mqtt)"
         },
         "description": "Modifiez vos options.",
         "title": "Options de l'intégration Zendure"
@@ -421,6 +427,9 @@
       }
     },
     "switch": {
+      "mqtt_influx": {
+        "name": "Journal MQTT brut → InfluxDB"
+      },
       "lamp_switch": {
         "name": "LED"
       },

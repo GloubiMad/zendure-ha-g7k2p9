@@ -51,7 +51,13 @@
         "data": {
           "p1meter": "P1 Sensor for smart matching",
           "mqttlog": "Log MQTT communication",
-          "auto_mqtt_user": "Automatically manage MQTT users"
+          "auto_mqtt_user": "Automatically manage MQTT users",
+          "simulation": "simulation.csv log (regulation analysis)",
+          "influx_enable": "Enable InfluxDB connection",
+          "influx_url": "InfluxDB — URL (http://host:8086)",
+          "influx_org": "InfluxDB — Organisation",
+          "influx_token": "InfluxDB — Token (write)",
+          "mqtt_influx": "Log raw MQTT to InfluxDB (zendure_mqtt bucket)"
         },
         "description": "Amend your options.",
         "title": "Zendure Integration Options"
@@ -468,6 +474,9 @@
       }
     },
     "switch": {
+      "mqtt_influx": {
+        "name": "Raw MQTT log → InfluxDB"
+      },
       "lamp_switch": {
         "name": "LED"
       },
