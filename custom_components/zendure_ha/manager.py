@@ -332,13 +332,16 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             self.p1meterEvent = None
 
     def writeSimulation(self, time: datetime, p1: int) -> None:
-        if Path("simulation.csv").exists() is False:
-            with Path("simulation.csv").open("w") as f:
+        # Chemin explicite dans /config (le CWD de HA n'est pas garanti).
+        path = Path(self.hass.config.path("simulation.csv"))
+        if path.exists() is False:
+            _LOGGER.info("Creating simulation log: %s", path)
+            with path.open("w") as f:
                 f.write(
                     "Time;P1;Operation;Battery;Solar;Home;SetPoint;--;"
                     + ";".join(
                         [
-                            f"bat;Prod;Home;{
+                            f"bat;Prod;Home;Cmd;Soc;Conn;ChLim;St;Age;Grid;Byp;Tmp;CTmp;{
                                 json.dumps(
                                     DeviceSettings(
                                         d.name,
@@ -359,7 +362,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     + "\n"
                 )
 
-        with Path("simulation.csv").open("a") as f:
+        with path.open("a") as f:
             data = ""
             tbattery = 0
             tsolar = 0
@@ -369,9 +372,26 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 tbattery += (pwr_battery := d.batteryOutput.asInt - d.batteryInput.asInt)
                 tsolar += (pwr_solar := d.solarInput.asInt)
                 thome += (pwr_home := d.homeOutput.asInt - d.homeInput.asInt)
-                data += f";{pwr_battery};{pwr_solar};{pwr_home};{d.electricLevel.asInt}"
+                # Cmd = consigne manager AVANT clamp (à comparer à Home réalisé) ; St = DeviceState
+                # (0=OFFLINE 1=SOCEMPTY 2=INACTIVE 3=SOCFULL 4=ACTIVE) ; Age = secondes depuis le dernier
+                # message MQTT réel (-1 si jamais vu ; l'amont stampe lastseen = msg + 5 min).
+                age = int((time - (d.lastseen - timedelta(minutes=5))).total_seconds()) if d.lastseen != datetime.min else -1
+                # Grid = gridReverse (0=disabled 1=allow 2=forbidden ; -1 si non reçu) ; Byp = exports_bypass.
+                gr = getattr(d, "gridReverse", None) or d.entities.get("gridReverse")
+                grv = getattr(gr, "value", None) if gr is not None else None
+                grid = grv if grv is not None else -1
+                # Tmp = température onduleur, CTmp = température cellule max (BMS) ; "" si non publié.
+                te = d.entities.get("hyperTmp")
+                ce = d.entities.get("maxTemp")
+                tmp = te.native_value if te is not None and te.native_value is not None else ""
+                ctmp = ce.native_value if ce is not None and ce.native_value is not None else ""
+                data += (
+                    f";{pwr_battery};{pwr_solar};{pwr_home};{d.cmd_target};{d.electricLevel.asInt}"
+                    f";{d.connectionStatus.asInt};{d.charge_limit};{d.state.value};{age};{grid};{int(d.exports_bypass)}"
+                    f";{tmp};{ctmp}"
+                )
 
-            f.write(f"{time};{p1};{self.operation};{tbattery};{tsolar};{thome};{self.manualpower.asNumber};" + data + "\n")
+            f.write(f"{time};{p1};{self.operation};{tbattery};{tsolar};{thome};{self.setpoint};" + data + "\n")
 
     async def _p1_changed(self, event: Event[EventStateChangedData]) -> None:
         # exit if there is nothing to do
