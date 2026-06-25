@@ -88,6 +88,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.idle_lvlmin = 0
         self.produced = 0
         self.pwr_low = 0
+        self.setpoint = 0  # derniere consigne de distribution calculee (telemetrie -> capteur setpoint)
 
     async def loadDevices(self) -> None:
         if self.config_entry is None or (data := await Api.Connect(self.hass, dict(self.config_entry.data), True)) is None:
@@ -110,6 +111,13 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.availableKwh = ZendureSensor(self, "available_kwh", None, "kWh", "energy_storage", None, 1)
         self.totalKwh = ZendureSensor(self, "total_kwh", None, "kWh", "energy_storage", "measurement", 2)
         self.power = ZendureSensor(self, "power", None, "W", "power", "measurement", 0)
+        # Capteurs d'observabilité (section B) :
+        #  - setpoint : la consigne de distribution calculée par powerChanged (instrument clé d'analyse)
+        #  - weighted_soc : SoC moyen du parc pondéré par la capacité
+        #  - usable_energy : % d'énergie dispo au-dessus du SoC mini
+        self.setpointSensor = ZendureSensor(self, "setpoint", None, "W", "power", "measurement", 0)
+        self.weightedSoc = ZendureSensor(self, "weighted_soc", None, "%", "battery", "measurement", 1)
+        self.usableEnergy = ZendureSensor(self, "usable_energy", None, "%", None, "measurement", 1, icon="mdi:battery-arrow-down-outline")
 
         # load devices
         for dev in data["deviceList"]:
@@ -284,8 +292,12 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         time = datetime.now()
         kwh = 0
+        weighted_soc = 0.0  # Σ(capacité × niveau) -> capteur weighted_soc
+        usable_kwh = 0.0  # Σ énergie dispo au-dessus du SoC mini -> capteur usable_energy
         for device in self.devices:
             kwh += device.kWh
+            weighted_soc += device.kWh * device.electricLevel.asNumber
+            usable_kwh += device.availableKwh.asNumber
             if isinstance(device, ZendureLegacy) and device.bleMac is None:
                 for si in bluetooth.async_discovered_service_info(self.hass, False):
                     if isBleDevice(device, si):
@@ -298,6 +310,10 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             device.setStatus()
         self.update_count += 1
         self.totalKwh.update_value(kwh)
+        # Pourcentages pondérés par la capacité (ignorés tant qu'aucune capacité n'est connue).
+        if kwh > 0:
+            self.weightedSoc.update_value(round(weighted_soc / kwh, 1))
+            self.usableEnergy.update_value(round(max(0.0, usable_kwh) / kwh * 100, 1))
 
         # Manually update the timer
         if self.hass and self.hass.loop.is_running():
@@ -467,6 +483,11 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         # cycling to 0W with bypass forbidden + 100% SoC).
         if self.discharge_bypass > 0:
             setpoint = max(0 if p1 >= 0 else setpoint - self.discharge_bypass, setpoint - self.discharge_bypass)
+
+        # Télémétrie (section B) : expose la consigne FINALE calculée -> capteur setpoint (+ InfluxDB/simu).
+        # Instrument clé pour analyser la régulation : comparer P1 (réel) vs setpoint (décidé) vs réalisé.
+        self.setpoint = setpoint
+        self.setpointSensor.update_value(setpoint)
 
         # Update power distribution.
         _LOGGER.info("P1 ======> p1:%s isFast:%s, setpoint:%sW stored:%sW", p1, isFast, setpoint, self.produced)
