@@ -818,12 +818,14 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     if d.state == DeviceState.SOCFULL and (d.exports_bypass or self.socFullStrategy.value == SmartMode.STRAT_NO_EXPORT):
                         self.discharge_bypass += min(-d.pwr_produced, home)
                     self.discharge_limit += d.fuseGrp.discharge_limit(d)
-                    # Un SOCFULL ne peut fournir que son solaire (déjà compté via
-                    # discharge_produced) : power_discharge clampe son pwr à
-                    # -pwr_produced. Compter sa capacité batterie ici gonflait le
-                    # seuil dev_start (~600 W) et empêchait de redémarrer un device
-                    # idle alors que la maison importait 300-500 W.
-                    self.discharge_optimal += d.discharge_optimal if d.state != DeviceState.SOCFULL else 0
+                    # Ni un SOCFULL ni un SOCEMPTY ne peut fournir sa capacité batterie
+                    # nominale : le plein ne draine pas sa batterie, le vide n'en a plus ;
+                    # les deux ne passent que leur solaire (déjà compté via discharge_produced,
+                    # power_discharge clampe leur pwr). Compter leur discharge_optimal ici
+                    # gonflait le seuil dev_start (~600 W) et empêchait de réveiller un device
+                    # idle alors que la maison importait 300-500 W (cas vérifié 25/06 : up plein
+                    # idle JAMAIS réveillé car le discharge_optimal d'un glagla VIDE était compté).
+                    self.discharge_optimal += d.discharge_optimal if d.state not in (DeviceState.SOCFULL, DeviceState.SOCEMPTY) else 0
                     self.discharge_produced -= d.pwr_produced
                     self.discharge_weight += d.pwr_max * d.electricLevel.asInt
                     setpoint += home
