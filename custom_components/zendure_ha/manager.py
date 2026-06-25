@@ -1040,19 +1040,24 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 pwr = int(setpoint / (len(self.discharge) - i))
             else:
                 pwr = 0
-            # SOCFULL devices should only pass through solar, not drain battery
-            if pwr < -d.pwr_produced and d.state == DeviceState.SOCFULL:
+            # SOCFULL ET SOCEMPTY ne contribuent QUE leur solaire (plein = on ne draine pas la
+            # batterie ; vide = rien à drainer). On plancher leur consigne à -pwr_produced pour que
+            # TOUT leur solaire passe, même si la pondération par SoC leur donnait une part plus
+            # faible (sinon un glagla vide à 15 % voyait son PV cappé à ~60 W au lieu de ~300 W).
+            if pwr < -d.pwr_produced and d.state in (DeviceState.SOCFULL, DeviceState.SOCEMPTY):
                 pwr = -d.pwr_produced
             self.discharge_weight -= device_weight
 
             # adjust the limit, make sure we have 'enough' power to discharge
             limit -= -d.pwr_produced if solaronly else d.pwr_max
             if limit < setpoint - pwr:
-                pwr = max(setpoint - limit, 0 if d.state != DeviceState.SOCFULL else -d.pwr_produced)
+                pwr = max(setpoint - limit, 0 if d.state not in (DeviceState.SOCFULL, DeviceState.SOCEMPTY) else -d.pwr_produced)
             pwr = min(pwr, setpoint, d.pwr_max)
 
-            # make sure we have devices in optimal working range
-            if len(self.discharge) > 1 and i == 0 and d.state != DeviceState.SOCFULL:
+            # make sure we have devices in optimal working range (anti-flicker du device de tête).
+            # On EXCLUT aussi SOCEMPTY : un device vide ne fait que passer son solaire ; le mettre à 0
+            # ici jetait du PV (régression .23 : up rejoint la décharge -> glagla devient tête -> coupé).
+            if len(self.discharge) > 1 and i == 0 and d.state not in (DeviceState.SOCFULL, DeviceState.SOCEMPTY):
                 self.pwr_low = 0 if (delta := d.discharge_start * 1.5 - pwr) <= 0 else self.pwr_low + int(delta)
                 pwr = 0 if self.pwr_low > d.discharge_optimal else pwr
 
@@ -1064,7 +1069,11 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             self.idle.sort(key=lambda d: d.electricLevel.asInt, reverse=True)
             for d in self.idle:
                 if d.state != DeviceState.SOCEMPTY:
-                    await d.power_discharge(SmartMode.POWER_START)
+                    # Amorcer au discharge_start du device (≥ POWER_START), pas à 50 W fixe : un Hyper
+                    # consomme ~50 W d'overhead, donc un coup de 50 W est mangé -> 0 W net au foyer ->
+                    # le device ne "décolle" jamais (reste idle, ne gradue jamais en décharge).
+                    # discharge_start (=limit/10, ~120 W) franchit l'overhead -> sortie nette positive.
+                    await d.power_discharge(max(SmartMode.POWER_START, d.discharge_start))
                     if (dev_start := dev_start - d.discharge_optimal * 2) <= 0:
                         break
             self.pwr_low: int = 0
