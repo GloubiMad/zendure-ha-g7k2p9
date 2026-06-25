@@ -19,6 +19,14 @@ CONF_WIFISSID = "wifissid"
 CONF_WIFIPSW = "wifipsw"
 CONF_AUTO_MQTT_USER = "auto_mqtt_user"
 
+# InfluxDB v2 exporter (dedicated bucket telemetry trace)
+CONF_INFLUX_ENABLE = "influx_enable"
+CONF_INFLUX_URL = "influx_url"
+CONF_INFLUX_ORG = "influx_org"
+CONF_INFLUX_TOKEN = "influx_token"
+CONF_INFLUX_BUCKET = "influx_bucket"
+CONF_MQTT_INFLUX = "mqtt_influx"  # journaliser les messages MQTT bruts -> bucket dédié zendure_mqtt
+
 CONF_HAKEY = "C*dafwArEOXK"
 
 
