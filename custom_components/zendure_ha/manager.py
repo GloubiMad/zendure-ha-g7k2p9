@@ -1064,16 +1064,18 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             setpoint -= await d.power_discharge(pwr)
             dev_start += 1 if pwr != 0 and d.electricLevel.asInt + 3 < self.idle_lvlmax else 0
 
-        # start idle device if needed
-        if dev_start > 0 and len(self.idle) > 0:
+        # start idle device if needed — UNIQUEMENT si le résiduel NON couvert (setpoint après la
+        # boucle ci-dessus, càd ce que glagla & co n'ont pas absorbé) atteint au moins POWER_MIN.
+        # Sinon (ex. glagla couvre déjà ~toute la maison, P1≈0), réveiller up le ferait démarrer à
+        # ~60 W, SUR-couvrir (export), être recoupé puis re-réveillé -> start/stop (cycling .24 au
+        # point d'équilibre). En dessous de POWER_MIN on LAISSE le petit import plutôt que claquer up.
+        if dev_start > 0 and setpoint >= SmartMode.POWER_MIN and len(self.idle) > 0:
             self.idle.sort(key=lambda d: d.electricLevel.asInt, reverse=True)
             for d in self.idle:
                 if d.state != DeviceState.SOCEMPTY:
-                    # Amorcer au discharge_start du device (≥ POWER_START), pas à 50 W fixe : un Hyper
-                    # consomme ~50 W d'overhead, donc un coup de 50 W est mangé -> 0 W net au foyer ->
-                    # le device ne "décolle" jamais (reste idle, ne gradue jamais en décharge).
-                    # discharge_start (=limit/10, ~120 W) franchit l'overhead -> sortie nette positive.
-                    await d.power_discharge(max(SmartMode.POWER_START, d.discharge_start))
+                    # Amorcer à POWER_MIN (~60 W, mini utile d'un Hyper) : assez pour décoller, sans
+                    # sur-couvrir. La vraie puissance vient ensuite de la boucle, une fois up gradué.
+                    await d.power_discharge(SmartMode.POWER_MIN)
                     if (dev_start := dev_start - d.discharge_optimal * 2) <= 0:
                         break
             self.pwr_low: int = 0

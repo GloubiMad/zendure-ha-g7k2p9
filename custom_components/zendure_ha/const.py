@@ -85,6 +85,7 @@ class SmartMode:
     HEMSOFF_TIMEOUT = 60  # Seconds before HEMS state is set to OFF if no updates are received
 
     POWER_START = 50  # Minimum Power (W) for starting a device
+    POWER_MIN = 60  # Puissance mini UTILE d'un Hyper en charge/décharge : sous ce seuil il ne tient pas
     POWER_TOLERANCE = 5  # Device-level power tolerance (W) before updating
 
     # On every MQTT message a device's lastseen is stamped at now + this many
