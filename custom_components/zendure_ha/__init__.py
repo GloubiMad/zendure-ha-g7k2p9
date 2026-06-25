@@ -7,7 +7,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 
 from .api import Api
-from .const import CONF_MQTTLOG, CONF_P1METER, CONF_SIM
+from .const import CONF_MQTT_INFLUX, CONF_MQTTLOG, CONF_P1METER, CONF_SIM
 from .device import ZendureDevice
 from .manager import ZendureConfigEntry, ZendureManager
 from .migration import Migration
@@ -30,6 +30,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ZendureConfigEntry) -> b
     """Set up Zendure as config entry."""
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     manager = ZendureManager(hass, entry)
+    # Charge les flags runtime au démarrage (sinon mqttInflux/simulation retombent à False jusqu'à
+    # une sauvegarde d'options) + (re)crée le writer InfluxDB du log MQTT brut.
+    ZendureManager.simulation = entry.data.get(CONF_SIM, False)
+    Api.mqttInflux = entry.data.get(CONF_MQTT_INFLUX, False)
+    manager.configure_influx()
     await manager.loadDevices()
     entry.runtime_data = manager
     await manager.async_config_entry_first_refresh()
@@ -41,7 +46,9 @@ async def update_listener(_hass: HomeAssistant, entry: ZendureConfigEntry) -> No
     """Handle options update."""
     _LOGGER.debug("Updating Zendure config entry: %s", entry.entry_id)
     Api.mqttLogging = entry.data.get(CONF_MQTTLOG, False)
+    Api.mqttInflux = entry.data.get(CONF_MQTT_INFLUX, False)
     ZendureManager.simulation = entry.data.get(CONF_SIM, False)
+    entry.runtime_data.configure_influx()
     entry.runtime_data.update_p1meter(entry.data.get(CONF_P1METER, "sensor.power_actual"))
 
 

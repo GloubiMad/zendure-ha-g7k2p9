@@ -15,6 +15,11 @@ from .api import Api
 from .const import (
     CONF_APPTOKEN,
     CONF_AUTO_MQTT_USER,
+    CONF_INFLUX_ENABLE,
+    CONF_INFLUX_ORG,
+    CONF_INFLUX_TOKEN,
+    CONF_INFLUX_URL,
+    CONF_MQTT_INFLUX,
     CONF_MQTTLOCAL,
     CONF_MQTTLOG,
     CONF_MQTTPORT,
@@ -165,6 +170,13 @@ class ZendureOptionsFlowHandler(OptionsFlow):
                 vol.Required(CONF_MQTTLOG, default=self.config_entry.data[CONF_MQTTLOG]): bool,
                 vol.Optional(CONF_AUTO_MQTT_USER, default=self.config_entry.data.get(CONF_AUTO_MQTT_USER, False)): bool,
                 vol.Optional(CONF_SIM, default=self.config_entry.data.get(CONF_SIM, False)): bool,
+                # Log MQTT brut -> InfluxDB (bucket zendure_mqtt) : connexion + activation.
+                # Token en str simple (pas password) : un sélecteur password effaçait le token au re-save.
+                vol.Optional(CONF_INFLUX_ENABLE, default=self.config_entry.data.get(CONF_INFLUX_ENABLE, False)): bool,
+                vol.Optional(CONF_INFLUX_URL, default=self.config_entry.data.get(CONF_INFLUX_URL, "")): str,
+                vol.Optional(CONF_INFLUX_ORG, default=self.config_entry.data.get(CONF_INFLUX_ORG, "")): str,
+                vol.Optional(CONF_INFLUX_TOKEN, default=self.config_entry.data.get(CONF_INFLUX_TOKEN, "")): str,
+                vol.Optional(CONF_MQTT_INFLUX, default=self.config_entry.data.get(CONF_MQTT_INFLUX, False)): bool,
             }
         )
 

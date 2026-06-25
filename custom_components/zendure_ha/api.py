@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -22,6 +23,7 @@ from paho.mqtt import enums as mqtt_enums
 from .const import (
     CONF_APPTOKEN,
     CONF_HAKEY,
+    CONF_MQTT_INFLUX,
     CONF_MQTTLOG,
     CONF_MQTTPORT,
     CONF_MQTTPSW,
@@ -43,6 +45,7 @@ from .devices.solarflow2400 import SolarFlow2400AC, SolarFlow2400AC_Plus, SolarF
 from .devices.solarflow4000 import SolarFlow4000AC_Plus
 from .devices.superbasev4600 import SuperBaseV4600
 from .devices.superbasev6400 import SuperBaseV6400
+from .influx import mqtt_points
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -78,6 +81,9 @@ class Api:
     mqttCloud = mqtt_client.Client(userdata="cloud")
     mqttLocal = mqtt_client.Client(userdata="local")
     mqttLogging: bool = False
+    mqttInflux: bool = False  # journaliser les messages MQTT BRUTS vers le bucket InfluxDB zendure_mqtt
+    hass: Any = None  # réf hass pour planifier l'écriture influx depuis le thread MQTT (posée par configure_influx)
+    influx_mqtt: Any = None  # writer InfluxDB du bucket dédié zendure_mqtt (posé par configure_influx)
     devices: dict[str, ZendureDevice] = {}
     cloudServer: str = ""
     cloudPort: str = ""
@@ -91,6 +97,7 @@ class Api:
     def Init(self, data: Mapping[str, Any], mqtt: Mapping[str, Any]) -> None:
         """Initialize Zendure Api."""
         Api.mqttLogging = data.get(CONF_MQTTLOG, False)
+        Api.mqttInflux = data.get(CONF_MQTT_INFLUX, False)
         Api.mqttCloud.__init__(mqtt_enums.CallbackAPIVersion.VERSION2, mqtt["clientId"], False, "cloud", mqtt_enums.MQTTProtocolVersion.MQTTv31)
         url = mqtt["url"]
         Api.cloudServer, Api.cloudPort = url.rsplit(":", 1) if ":" in url else (url, "1883")
@@ -253,6 +260,11 @@ class Api:
                 if self.mqttLogging:
                     _LOGGER.info("Topic: %s => %s", msg.topic.replace(device.deviceId, device.name).replace(device.snNumber, "snxxx"), payload)
 
+                # Journal MQTT BRUT -> InfluxDB (bucket zendure_mqtt) au lieu de noyer les logs HA.
+                # On planifie l'écriture sur la boucle HA depuis CE thread paho (fire-and-forget).
+                if Api.mqttInflux and Api.influx_mqtt is not None and Api.hass is not None and (pts := mqtt_points(device.name, topics[3], payload)):
+                    asyncio.run_coroutine_threadsafe(Api.influx_mqtt.write(pts), Api.hass.loop)
+
                 if device.mqttMessage(topics[3], payload) and device.mqtt != client:
                     device.mqtt = client
                     device.setStatus()
@@ -288,6 +300,10 @@ class Api:
 
                 if self.mqttLogging:
                     _LOGGER.info("Local topic: %s => %s", msg.topic.replace(device.deviceId, device.name).replace(device.snNumber, "snxxx"), payload)
+
+                # Journal MQTT BRUT -> InfluxDB (bucket zendure_mqtt), même chemin que côté cloud.
+                if Api.mqttInflux and Api.influx_mqtt is not None and Api.hass is not None and (pts := mqtt_points(device.name, topics[3], payload)):
+                    asyncio.run_coroutine_threadsafe(Api.influx_mqtt.write(pts), Api.hass.loop)
 
                 if device.mqttMessage(topics[3], payload):
                     if device.mqtt != client:

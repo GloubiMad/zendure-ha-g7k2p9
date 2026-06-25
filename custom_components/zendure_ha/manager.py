@@ -27,6 +27,11 @@ from homeassistant.loader import async_get_integration
 from .api import Api
 from .const import (
     CONF_AUTO_MQTT_USER,
+    CONF_INFLUX_ENABLE,
+    CONF_INFLUX_ORG,
+    CONF_INFLUX_TOKEN,
+    CONF_INFLUX_URL,
+    CONF_MQTT_INFLUX,
     CONF_P1METER,
     DOMAIN,
     DeviceState,
@@ -40,6 +45,7 @@ from .fusegroup import FuseGroup
 from .number import ZendureRestoreNumber
 from .select import ZendureRestoreSelect, ZendureSelect
 from .sensor import ZendureSensor
+from .switch import ZendureSwitch
 
 SCAN_INTERVAL = timedelta(seconds=60)
 
@@ -118,6 +124,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.setpointSensor = ZendureSensor(self, "setpoint", None, "W", "power", "measurement", 0)
         self.weightedSoc = ZendureSensor(self, "weighted_soc", None, "%", "battery", "measurement", 1)
         self.usableEnergy = ZendureSensor(self, "usable_energy", None, "%", None, "measurement", 1, icon="mdi:battery-arrow-down-outline")
+        # Switch live : journaliser les messages MQTT BRUTS des Hyper -> bucket InfluxDB dédié zendure_mqtt
+        # (au lieu de noyer les logs HA). Indépendant. Persisté dans entry.data (CONF_MQTT_INFLUX).
+        self.mqttInfluxSwitch = ZendureSwitch(self, "mqtt_influx", self._toggle_mqtt_influx, value=Api.mqttInflux)
 
         # load devices
         for dev in data["deviceList"]:
@@ -330,6 +339,33 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 self.p1_factor = 1000
         else:
             self.p1meterEvent = None
+
+    def configure_influx(self) -> None:
+        """(Re)crée le writer InfluxDB du bucket dédié 'zendure_mqtt' (log MQTT brut) depuis les options.
+
+        Focalisé log MQTT : on ne crée QUE le writer du bucket zendure_mqtt (pas d'exporteur HA_ZENDURE).
+        Posé sur Api pour que le handler MQTT (thread paho) puisse écrire. Recréé à chaque (re)config.
+        """
+        Api.hass = self.hass
+        Api.influx_mqtt = None
+        data = self.config_entry.data if self.config_entry is not None else {}
+        if not data.get(CONF_INFLUX_ENABLE) or not data.get(CONF_INFLUX_URL) or not data.get(CONF_INFLUX_TOKEN):
+            return
+        from .influx import ZendureInflux
+
+        Api.influx_mqtt = ZendureInflux(self.hass, data[CONF_INFLUX_URL], data.get(CONF_INFLUX_ORG, ""), data[CONF_INFLUX_TOKEN], "zendure_mqtt")
+        _LOGGER.info("Journal MQTT->InfluxDB actif -> bucket zendure_mqtt")
+
+    async def _toggle_mqtt_influx(self, _entity: ZendureSwitch, value: Any) -> None:
+        """Active/désactive le journal MQTT brut -> InfluxDB (bucket zendure_mqtt) EN DIRECT (switch)."""
+        on = bool(int(value))
+        Api.mqttInflux = on
+        self.mqttInfluxSwitch.update_value(1 if on else 0)
+        if self.config_entry is not None:
+            self.hass.config_entries.async_update_entry(self.config_entry, data={**self.config_entry.data, CONF_MQTT_INFLUX: on})
+        if on and Api.influx_mqtt is None:
+            _LOGGER.warning("Journal MQTT->InfluxDB activé mais InfluxDB pas configuré (rien ne sera écrit)")
+        _LOGGER.info("Journal MQTT->InfluxDB %s", "activé (bucket zendure_mqtt)" if on else "désactivé")
 
     def writeSimulation(self, time: datetime, p1: int) -> None:
         # Chemin explicite dans /config (le CWD de HA n'est pas garanti).
