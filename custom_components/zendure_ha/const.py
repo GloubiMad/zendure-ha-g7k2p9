@@ -50,6 +50,7 @@ class ManagerMode(Enum):
     MATCHING_DISCHARGE = 3
     MATCHING_CHARGE = 4
     STORE_SOLAR = 5
+    MONITOR = 6
 
 
 class ManagerState(Enum):

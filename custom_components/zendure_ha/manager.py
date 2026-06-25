@@ -110,7 +110,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.attr_device_info["sw_version"] = integration.manifest.get("version", "unknown")
 
         self.operationmode = (
-            ZendureRestoreSelect(self, "Operation", {0: "off", 1: "manual", 2: "smart", 3: "smart_discharging", 4: "smart_charging", 5: "store_solar"}, self.update_operation),
+            ZendureRestoreSelect(self, "Operation", {0: "off", 1: "manual", 2: "smart", 3: "smart_discharging", 4: "smart_charging", 5: "store_solar", 6: "monitor"}, self.update_operation),
         )
         self.operationstate = ZendureSensor(self, "operation_state")
         self.manualpower = ZendureRestoreNumber(self, "manual_power", None, None, "W", "power", 12000, -12000, NumberMode.BOX, True)
@@ -578,6 +578,13 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
             case ManagerMode.OFF:
                 self.operationstate.update_value(ManagerState.OFF.value)
+
+            case ManagerMode.MONITOR:
+                # SURVEILLANCE : on observe/log les données MQTT des Hyper telles quelles (ce que le cloud
+                # Zendure leur envoie/reçoit), AUCUNE commande envoyée. À coupler avec l'option « Journaliser
+                # la communication MQTT » (mqttLogging) pour tracer le trafic cloud. simulation.csv continue
+                # de logger l'observé. Le watchdog de commande est inactif ici (aucune consigne).
+                self.operationstate.update_value(ManagerState.IDLE.value)
 
     async def power_charge(self, setpoint: int, time: datetime) -> None:
         """Charge devices."""
