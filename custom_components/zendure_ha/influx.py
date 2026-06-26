@@ -59,20 +59,14 @@ def mqtt_points(device_name: str, subtopic: str, payload: Any) -> list[str]:
         return []
     fields: dict[str, Any] = {}
     for k, v in src.items():
-        if isinstance(v, bool):
-            fields[str(k)] = v
-        elif isinstance(v, (int, float)):
-            fields[str(k)] = float(v)
-        elif isinstance(v, str):
-            # Type Influx STABLE : un même champ (ex. messageId) arrive tantôt en nombre, tantôt en
-            # string "123" -> on coerce les strings numériques en float pour éviter le conflit de type
-            # (422 "field type conflict: messageId is type string, already exists as float").
-            try:
-                fields[str(k)] = float(v)
-            except ValueError:
-                fields[str(k)] = v
-        else:
-            fields[str(k)] = json.dumps(v, default=str)
+        if v is None:
+            continue
+        # TOUT en string. Un message MQTT brut a des champs de type incohérent d'un message à l'autre
+        # (messageId, onlineFlag... tantôt nombre, bool, string) ; InfluxDB n'accepte qu'UN type par
+        # champ et rejetait le batch entier (422 field type conflict). String partout = type STABLE,
+        # zéro conflit possible. La télémétrie numérique reste graphable via simulation.csv ; ce bucket
+        # sert au CAPTURE BRUT (voir les messages tels quels). _field met les strings entre guillemets.
+        fields[str(k)] = json.dumps(v, default=str) if isinstance(v, (dict, list)) else str(v)
     p = line("zendure_mqtt", {"device": device_name, "topic": subtopic}, fields)
     return [p] if p else []
 
