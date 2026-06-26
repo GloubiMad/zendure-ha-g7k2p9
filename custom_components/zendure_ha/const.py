@@ -80,3 +80,13 @@ class SmartMode:
 
     POWER_START = 50  # Minimum Power (W) for starting a device
     POWER_TOLERANCE = 5  # Device-level power tolerance (W) before updating
+
+    # lastseen est stampé à message_time + cet offset ; le watchdog le retranche pour
+    # retrouver l'heure réelle du dernier message (5 min = timedelta(minutes=5) côté device).
+    MQTT_LASTSEEN_OFFSET = 300
+    # Watchdog de fraîcheur MQTT : un broker peut garder la session TCP vivante
+    # (is_connected()==True) tout en ne livrant plus le topic d'un device → l'appli Zendure
+    # voit les données mais HA ne reçoit rien (cas vécu : up muet après maj firmware).
+    MQTT_STALE_TIMEOUT = 150  # s de silence avant de re-souscrire un device
+    MQTT_RECONNECT_TIMEOUT = 420  # silence total avant de forcer une reconnexion du client
+    MQTT_RESUB_COOLDOWN = 120  # s minimum entre 2 actions de récupération par device

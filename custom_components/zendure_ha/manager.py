@@ -75,6 +75,11 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.p1_factor = 1
         self.update_count = 0
 
+        # Watchdog de fraîcheur MQTT (récupère une souscription muette / un socket à moitié mort).
+        self._last_msg: dict[str, datetime] = {}  # heure réelle du dernier message par deviceId
+        self._resubscribe_after: dict[str, datetime] = {}  # cooldown de récupération par device
+        self._started = datetime.now()  # réf boot pour récupérer un device jamais vu
+
         self.charge: list[ZendureDevice] = []
         self.charge_limit = 0
         self.charge_optimal = 0
@@ -324,9 +329,106 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             self.weightedSoc.update_value(round(weighted_soc / kwh, 1))
             self.usableEnergy.update_value(round(max(0.0, usable_kwh) / kwh * 100, 1))
 
+        # Watchdog MQTT : récupère un client déconnecté / une souscription muette (ex. up muet après
+        # maj firmware). Sur l'executor car client.reconnect()/subscribe() sont bloquants.
+        await self.hass.async_add_executor_job(self._check_mqtt_health)
+
         # Manually update the timer
         if self.hass and self.hass.loop.is_running():
             self._schedule_refresh()
+
+    def _check_mqtt_health(self) -> None:
+        """Vérifie que les clients MQTT sont connectés ; reconnecte sinon, puis fraîcheur."""
+
+        def _check(client: Any, label: str) -> None:
+            if client is None:
+                return
+            try:
+                if client.is_connected():
+                    return
+                _LOGGER.warning("MQTT %s client deconnecte, reconnexion forcee", label)
+                client.reconnect()
+            except Exception as err:  # pylint: disable=broad-except
+                _LOGGER.error("MQTT %s reconnect failed: %s", label, err)
+
+        _check(Api.mqttCloud, "cloud")
+        if Api.localServer:
+            _check(Api.mqttLocal, "local")
+        # Relais cloud par device (créés à la demande quand un device legacy publie en local).
+        for device in Api.devices.values():
+            if device.zendure is not None:
+                _check(device.zendure, f"zendure[{device.name}]")
+
+        self._check_mqtt_staleness()
+
+    def _check_mqtt_staleness(self) -> None:
+        """Récupère un 'connecté mais plus de données' (souscription tombée silencieusement).
+
+        Un broker peut garder la session TCP vivante (is_connected()==True) tout en ne livrant
+        plus le topic d'un device : l'appli Zendure montre des données mais HA ne reçoit rien
+        (cas vécu : up muet après maj firmware). On retrouve l'heure RÉELLE du dernier message
+        via lastseen (= message_time + MQTT_LASTSEEN_OFFSET) et on agit de façon graduée,
+        throttlée par MQTT_RESUB_COOLDOWN : re-souscrire le device muet ; si TOUT le client est
+        muet au-delà de MQTT_RECONNECT_TIMEOUT, forcer une reconnexion.
+        """
+        now = datetime.now()
+        offset = timedelta(seconds=SmartMode.MQTT_LASTSEEN_OFFSET)
+
+        silence: dict[str, float] = {}
+        for device in self.devices:
+            if device.mqtt is None:
+                continue
+            if device.lastseen != datetime.min:
+                self._last_msg[device.deviceId] = device.lastseen - offset
+            if (msg_time := self._last_msg.get(device.deviceId)) is not None:
+                silence[device.deviceId] = (now - msg_time).total_seconds()
+
+        # Angle mort démarrage à froid : un device jamais vu (lastseen==min, device.mqtt None)
+        # n'entre jamais dans 'silence'. S'il reste invisible bien après le boot, sa souscription
+        # n'a sans doute pas pris → re-souscrire sur cloud ET local (on ignore quel broker il utilise).
+        if (now - self._started).total_seconds() >= SmartMode.MQTT_STALE_TIMEOUT:
+            for device in self.devices:
+                if device.lastseen != datetime.min:
+                    continue
+                if (until := self._resubscribe_after.get(device.deviceId)) is not None and now < until:
+                    continue
+                _LOGGER.warning("Device %s jamais vu depuis le demarrage ; re-souscription cloud+local", device.name)
+                for client in (Api.mqttCloud, Api.mqttLocal):
+                    try:
+                        if client is not None and client.is_connected():
+                            Api.subscribeDevice(client, device)
+                    except Exception as err:  # pylint: disable=broad-except
+                        _LOGGER.error("Re-souscription demarrage a froid de %s echouee: %s", device.name, err)
+                self._resubscribe_after[device.deviceId] = now + timedelta(seconds=SmartMode.MQTT_RESUB_COOLDOWN)
+
+        if not silence:
+            return
+
+        # Si un device livre, le client est sain → jamais reconnecter (device isolé muet = souci
+        # côté device, pas socket), juste re-souscrire.
+        any_fresh = any(s < SmartMode.MQTT_STALE_TIMEOUT for s in silence.values())
+        reconnected: set[int] = set()
+
+        for device in self.devices:
+            if (silent := silence.get(device.deviceId)) is None or silent < SmartMode.MQTT_STALE_TIMEOUT:
+                continue
+            if (until := self._resubscribe_after.get(device.deviceId)) is not None and now < until:
+                continue
+            client = device.mqtt or Api.mqttCloud
+            if client is None or not client.is_connected():
+                continue
+            try:
+                if not any_fresh and silent >= SmartMode.MQTT_RECONNECT_TIMEOUT:
+                    if id(client) not in reconnected:
+                        _LOGGER.warning("MQTT ne livre rien (device %s muet %ds) ; reconnexion forcee", device.name, int(silent))
+                        client.reconnect()
+                        reconnected.add(id(client))
+                else:
+                    _LOGGER.warning("Device %s muet %ds alors que MQTT est connecte ; re-souscription", device.name, int(silent))
+                    Api.subscribeDevice(client, device)
+                self._resubscribe_after[device.deviceId] = now + timedelta(seconds=SmartMode.MQTT_RESUB_COOLDOWN)
+            except Exception as err:  # pylint: disable=broad-except
+                _LOGGER.error("Recuperation fraicheur MQTT pour %s echouee: %s", device.name, err)
 
     def update_p1meter(self, p1meter: str | None) -> None:
         """Update the P1 meter sensor."""

@@ -215,6 +215,17 @@ class Api:
         except Exception as e:
             _LOGGER.error("Unable to connect to Zendure %s!", e)
 
+    @staticmethod
+    def subscribeDevice(client: Any, device: ZendureDevice) -> None:
+        """(Re)souscrit les topics d'un device sur le client donné.
+
+        Utilisé par le watchdog de fraîcheur pour ré-armer une souscription
+        silencieusement tombée sans casser la connexion TCP. MQTT SUBSCRIBE est
+        idempotent : rafraîchir une souscription déjà active est un no-op.
+        """
+        client.subscribe(f"/{device.prodkey}/{device.deviceId}/#")
+        client.subscribe(f"iot/{device.prodkey}/{device.deviceId}/#")
+
     def mqttConnect(self, client: Any, userdata: Any, _flags: Any, rc: Any, _props: Any) -> None:
         _LOGGER.info("Client %s connected to MQTT broker, return code: %s", userdata, rc)
         if userdata == "zendure":
