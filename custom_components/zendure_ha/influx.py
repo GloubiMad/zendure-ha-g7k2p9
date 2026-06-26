@@ -59,7 +59,20 @@ def mqtt_points(device_name: str, subtopic: str, payload: Any) -> list[str]:
         return []
     fields: dict[str, Any] = {}
     for k, v in src.items():
-        fields[str(k)] = v if isinstance(v, (int, float, bool, str)) else json.dumps(v, default=str)
+        if isinstance(v, bool):
+            fields[str(k)] = v
+        elif isinstance(v, (int, float)):
+            fields[str(k)] = float(v)
+        elif isinstance(v, str):
+            # Type Influx STABLE : un même champ (ex. messageId) arrive tantôt en nombre, tantôt en
+            # string "123" -> on coerce les strings numériques en float pour éviter le conflit de type
+            # (422 "field type conflict: messageId is type string, already exists as float").
+            try:
+                fields[str(k)] = float(v)
+            except ValueError:
+                fields[str(k)] = v
+        else:
+            fields[str(k)] = json.dumps(v, default=str)
     p = line("zendure_mqtt", {"device": device_name, "topic": subtopic}, fields)
     return [p] if p else []
 
