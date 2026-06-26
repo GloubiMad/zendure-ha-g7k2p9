@@ -303,6 +303,18 @@ class ZendureDevice(EntityDevice):
         elif self.mqtt is not None:
             self.mqtt.publish(topic, payload)
 
+        # Log la commande SORTANTE (ce que l'INTÉGRATION envoie aux Hyper) -> bucket zendure_mqtt,
+        # tag topic="cmd_out" pour la distinguer des messages reçus. Imports locaux (anti-circulaire).
+        from .api import Api  # noqa: PLC0415
+
+        if Api.mqttInflux and Api.influx_mqtt is not None and Api.hass is not None:
+            import asyncio  # noqa: PLC0415
+
+            from .influx import mqtt_points  # noqa: PLC0415
+
+            if pts := mqtt_points(self.name, "cmd_out", command):
+                asyncio.run_coroutine_threadsafe(Api.influx_mqtt.write(pts), Api.hass.loop)
+
     def mqttInvoke(self, command: Any) -> None:
         self._messageid += 1
         command["messageId"] = self._messageid

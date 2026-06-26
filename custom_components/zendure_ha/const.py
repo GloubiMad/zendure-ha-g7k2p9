@@ -87,6 +87,9 @@ class SmartMode:
     # Watchdog de fraîcheur MQTT : un broker peut garder la session TCP vivante
     # (is_connected()==True) tout en ne livrant plus le topic d'un device → l'appli Zendure
     # voit les données mais HA ne reçoit rien (cas vécu : up muet après maj firmware).
-    MQTT_STALE_TIMEOUT = 150  # s de silence avant de re-souscrire un device
-    MQTT_RECONNECT_TIMEOUT = 420  # silence total avant de forcer une reconnexion du client
-    MQTT_RESUB_COOLDOWN = 120  # s minimum entre 2 actions de récupération par device
+    # Les Hyper publient ~toutes les 1s (jour) et au pire au poll coordinateur (60s) → seuils
+    # AU-DESSUS de 60s pour ne pas re-souscrire à tort à chaque poll. Re-souscrire est idempotent
+    # et léger (on peut être réactif) ; la reconnexion est lourde → elle reste prudente.
+    MQTT_STALE_TIMEOUT = 90  # s de silence avant de re-souscrire un device (action légère)
+    MQTT_RECONNECT_TIMEOUT = 300  # silence TOTAL du client avant reconnexion forcée (action lourde)
+    MQTT_RESUB_COOLDOWN = 90  # s minimum entre 2 actions de récupération par device
