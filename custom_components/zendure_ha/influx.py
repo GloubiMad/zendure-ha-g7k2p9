@@ -67,7 +67,10 @@ def mqtt_points(device_name: str, subtopic: str, payload: Any) -> list[str]:
         # zéro conflit possible. La télémétrie numérique reste graphable via simulation.csv ; ce bucket
         # sert au CAPTURE BRUT (voir les messages tels quels). _field met les strings entre guillemets.
         fields[str(k)] = json.dumps(v, default=str) if isinstance(v, (dict, list)) else str(v)
-    p = line("zendure_mqtt", {"device": device_name, "topic": subtopic}, fields)
+    # Mesure "mqtt_zendure_raw" (et NON "zendure_mqtt") : on repart sur une mesure NEUVE, sans types de
+    # champs hérités de la période buggée -> les écritures all-string s'imposent proprement, zéro conflit,
+    # AUCUNE purge du bucket nécessaire côté user. Le bucket reste "zendure_mqtt", seule la mesure change.
+    p = line("mqtt_zendure_raw", {"device": device_name, "topic": subtopic}, fields)
     return [p] if p else []
 
 
