@@ -144,6 +144,16 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.chargeBuffer = ZendureRestoreNumber(self, "charge_buffer", None, None, "W", "power", 250, 0, NumberMode.BOX, True)
         # Cible calculée par le moteur (signée : + décharge, - charge) -> pour graphes/analyse vs réalisé.
         self.smartTarget = ZendureSensor(self, "smart_target", None, "W", "power", "measurement", 0)
+        # Options moteur supplémentaires (inspiré Gielz) :
+        #  - battery_order : priorité de distribution (soc = pondéré par SoC [actuel] ; device_order =
+        #    ordre fixe des appareils ; soc_reverse = SoC inversé). Pilote le TRI de power_charge/discharge.
+        #  - max_charge/discharge_power : plafond W sous la limite device (0 = limite device).
+        #  - engine_min/max_soc : bornes SoC SOUPLES du moteur SMART_BUFFER (le firmware garde minSoc/socSet).
+        self.batteryOrder = ZendureRestoreSelect(self, "battery_order", {0: "soc", 1: "device_order", 2: "soc_reverse"}, None, 0)
+        self.maxCharge = ZendureRestoreNumber(self, "max_charge_power", None, None, "W", "power", 12000, 0, NumberMode.BOX, True)
+        self.maxDischarge = ZendureRestoreNumber(self, "max_discharge_power", None, None, "W", "power", 12000, 0, NumberMode.BOX, True)
+        self.engineMinSoc = ZendureRestoreNumber(self, "engine_min_soc", None, None, "%", "battery", 50, 0, NumberMode.BOX, True)
+        self.engineMaxSoc = ZendureRestoreNumber(self, "engine_max_soc", None, None, "%", "battery", 100, 0, NumberMode.BOX, True)
 
         # load devices
         for dev in data["deviceList"]:
@@ -707,16 +717,23 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 # (anti-overshoot). power_discharge/power_charge clampent à la limite du device.
                 start_dis = int(self.startDischargingAt.asNumber)
                 start_chg = int(self.startChargingAt.asNumber)
-                if setpoint > 0 and setpoint >= start_dis:
+                max_dis = int(self.maxDischarge.asNumber)  # 0 = pas de cap (limite device)
+                max_chg = int(self.maxCharge.asNumber)
+                soc = self.weightedSoc.native_value if self.weightedSoc.native_value is not None else 50
+                if setpoint > 0 and setpoint >= start_dis and soc > self.engineMinSoc.asNumber:
                     factor = 1.0 if self._smart_active else 0.75
                     self._smart_active = True
                     target = max(0, int((setpoint - int(self.dischargeBuffer.asNumber)) * factor))
+                    if max_dis > 0:
+                        target = min(target, max_dis)
                     self.smartTarget.update_value(target)
                     await self.power_discharge(target)
-                elif setpoint < 0 and setpoint <= start_chg:
+                elif setpoint < 0 and setpoint <= start_chg and soc < self.engineMaxSoc.asNumber:
                     factor = 1.0 if self._smart_active else 0.75
                     self._smart_active = True
                     target = max(0, int((-setpoint - int(self.chargeBuffer.asNumber)) * factor))
+                    if max_chg > 0:
+                        target = min(target, max_chg)
                     self.smartTarget.update_value(-target)
                     await self.power_charge(-target, time)
                 else:
@@ -731,6 +748,18 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             case ManagerMode.QUICK_DISCHARGE:
                 # Décharge à fond : idem, clampée par power_discharge.
                 await self.power_discharge(99999)
+
+    def _order_devices(self, devs: list, charging: bool) -> list:
+        """Trie les devices selon battery_order (priorité de distribution).
+
+        'soc' (défaut) = pondéré par SoC : charge SoC desc, décharge SoC asc (comportement historique
+        inchangé). 'device_order' = ordre fixe des appareils (self.devices). 'soc_reverse' = SoC inversé.
+        """
+        order = self.batteryOrder.value
+        if order == 1:  # device_order
+            return sorted(devs, key=lambda d: self.devices.index(d) if d in self.devices else 99)
+        rev = order == 2  # soc_reverse
+        return sorted(devs, key=lambda d: d.electricLevel.asInt, reverse=(charging != rev))
 
     async def power_charge(self, setpoint: int, time: datetime) -> None:
         """Charge devices."""
@@ -757,7 +786,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         dev_start = min(0, setpoint - self.charge_optimal * 2) if setpoint < -SmartMode.POWER_START else 0
         limit = self.charge_limit
         setpoint = max(limit, setpoint)
-        for i, d in enumerate(sorted(self.charge, key=lambda d: d.electricLevel.asInt, reverse=True)):
+        for i, d in enumerate(self._order_devices(self.charge, True)):
             # Weight per device: pwr_max * remaining capacity (100 - SOC%).
             # Devices with lower SOC get a larger share of the charge power.
             # Guard against division by zero: charge_weight can be 0 when all
@@ -818,7 +847,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         solaronly = self.discharge_produced >= setpoint
         limit = self.discharge_produced if solaronly else self.discharge_limit
         setpoint = min(limit, setpoint)
-        for i, d in enumerate(sorted(self.discharge, key=lambda d: d.electricLevel.asInt, reverse=False)):
+        for i, d in enumerate(self._order_devices(self.discharge, False)):
             # Weight per device: pwr_max * SOC%. Devices with higher SOC get a
             # larger share of the discharge power.
             # Guard against division by zero: discharge_weight can be 0 when all
