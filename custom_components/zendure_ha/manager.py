@@ -100,6 +100,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.produced = 0
         self.pwr_low = 0
         self.setpoint = 0  # derniere consigne de distribution calculee (telemetrie -> capteur setpoint)
+        self._smart_active = False  # moteur SMART_BUFFER : True quand on charge/decharge (rampe 0.75->1.0)
 
     async def loadDevices(self) -> None:
         if self.config_entry is None or (data := await Api.Connect(self.hass, dict(self.config_entry.data), True)) is None:
@@ -115,7 +116,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.attr_device_info["sw_version"] = integration.manifest.get("version", "unknown")
 
         self.operationmode = (
-            ZendureRestoreSelect(self, "Operation", {0: "off", 1: "manual", 2: "smart", 3: "smart_discharging", 4: "smart_charging", 5: "store_solar", 6: "monitor"}, self.update_operation),
+            ZendureRestoreSelect(self, "Operation", {0: "off", 1: "manual", 2: "smart", 3: "smart_discharging", 4: "smart_charging", 5: "store_solar", 6: "monitor", 7: "smart_buffer", 8: "quick_charge", 9: "quick_discharge"}, self.update_operation),
         )
         self.operationstate = ZendureSensor(self, "operation_state")
         self.manualpower = ZendureRestoreNumber(self, "manual_power", None, None, "W", "power", 12000, -12000, NumberMode.BOX, True)
@@ -132,6 +133,17 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         # Switch live : journaliser les messages MQTT BRUTS des Hyper -> bucket InfluxDB dédié zendure_mqtt
         # (au lieu de noyer les logs HA). Indépendant. Persisté dans entry.data (CONF_MQTT_INFLUX).
         self.mqttInfluxSwitch = ZendureSwitch(self, "mqtt_influx", self._toggle_mqtt_influx, value=Api.mqttInflux)
+        # Réglages du moteur SMART_BUFFER (inspiré Gielz), réglables en direct, persistés :
+        #  - start_discharging_at : on ne décharge que si l'import dépasse ce seuil (deadband, W)
+        #  - start_charging_at : on ne charge que si l'export descend sous ce seuil (négatif, W)
+        #  - discharge_buffer / charge_buffer : marge laissée (on ne chasse pas les derniers W)
+        # max charge/décharge = limite du device (power_charge/discharge clampent déjà), pas de réglage.
+        self.startDischargingAt = ZendureRestoreNumber(self, "start_discharging_at", None, None, "W", "power", 500, 0, NumberMode.BOX, True)
+        self.startChargingAt = ZendureRestoreNumber(self, "start_charging_at", None, None, "W", "power", 0, -1000, NumberMode.BOX, True)
+        self.dischargeBuffer = ZendureRestoreNumber(self, "discharge_buffer", None, None, "W", "power", 250, 0, NumberMode.BOX, True)
+        self.chargeBuffer = ZendureRestoreNumber(self, "charge_buffer", None, None, "W", "power", 250, 0, NumberMode.BOX, True)
+        # Cible calculée par le moteur (signée : + décharge, - charge) -> pour graphes/analyse vs réalisé.
+        self.smartTarget = ZendureSensor(self, "smart_target", None, "W", "power", "measurement", 0)
 
         # load devices
         for dev in data["deviceList"]:
@@ -687,6 +699,38 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 # la communication MQTT » (mqttLogging) pour tracer le trafic cloud. simulation.csv continue
                 # de logger l'observé. Le watchdog de commande est inactif ici (aucune consigne).
                 self.operationstate.update_value(ManagerState.IDLE.value)
+
+            case ManagerMode.SMART_BUFFER:
+                # Moteur "buffers + rampe" (inspiré Gielz). setpoint = demande nette (P1 + corrections).
+                # On n'agit que si le résiduel franchit le seuil d'activation (start_*), on laisse un
+                # buffer (ne chasse pas les derniers W), et on rampe à 0.75 au démarrage puis 1.0
+                # (anti-overshoot). power_discharge/power_charge clampent à la limite du device.
+                start_dis = int(self.startDischargingAt.asNumber)
+                start_chg = int(self.startChargingAt.asNumber)
+                if setpoint > 0 and setpoint >= start_dis:
+                    factor = 1.0 if self._smart_active else 0.75
+                    self._smart_active = True
+                    target = max(0, int((setpoint - int(self.dischargeBuffer.asNumber)) * factor))
+                    self.smartTarget.update_value(target)
+                    await self.power_discharge(target)
+                elif setpoint < 0 and setpoint <= start_chg:
+                    factor = 1.0 if self._smart_active else 0.75
+                    self._smart_active = True
+                    target = max(0, int((-setpoint - int(self.chargeBuffer.asNumber)) * factor))
+                    self.smartTarget.update_value(-target)
+                    await self.power_charge(-target, time)
+                else:
+                    self._smart_active = False
+                    self.smartTarget.update_value(0)
+                    await self.power_discharge(0)
+
+            case ManagerMode.QUICK_CHARGE:
+                # Charge à fond : grosse consigne, clampée à la limite de chaque device par power_charge.
+                await self.power_charge(-99999, time)
+
+            case ManagerMode.QUICK_DISCHARGE:
+                # Décharge à fond : idem, clampée par power_discharge.
+                await self.power_discharge(99999)
 
     async def power_charge(self, setpoint: int, time: datetime) -> None:
         """Charge devices."""

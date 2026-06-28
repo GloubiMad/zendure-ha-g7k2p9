@@ -51,6 +51,9 @@ class ManagerMode(Enum):
     MATCHING_CHARGE = 4
     STORE_SOLAR = 5
     MONITOR = 6
+    SMART_BUFFER = 7  # moteur "buffers + rampe" (inspiré Gielz) : seuils start + buffer + facteur 0.75->1.0
+    QUICK_CHARGE = 8  # charge à fond (limite device)
+    QUICK_DISCHARGE = 9  # décharge à fond (limite device)
 
 
 class ManagerState(Enum):
