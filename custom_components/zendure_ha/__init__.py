@@ -31,6 +31,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ZendureConfigEntry) -> b
     """Set up Zendure as config entry."""
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     await EntityDevice.async_load_translations(hass)
+    # Lire les options AU DÉMARRAGE (sinon simulation/mqttlog restent au défaut False jusqu'à ce que
+    # l'utilisateur rouvre et ré-enregistre les options -> le log simulation ne redémarrait pas après reboot).
+    Api.mqttLogging = entry.data.get(CONF_MQTTLOG, False)
+    ZendureManager.simulation = entry.data.get(CONF_SIM, False)
     manager = ZendureManager(hass, entry)
     await manager.loadDevices()
     entry.runtime_data = manager
