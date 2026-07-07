@@ -449,6 +449,24 @@
           "smart_fondation": "Régulation intelligente (fondation)"
         }
       },
+      "fondation_discharge_strategy": {
+        "name": "Fondation : stratégie décharge",
+        "state": {
+          "hysteresis": "Hystérésis (plus plein d'abord)",
+          "hysteresis_wide": "Hystérésis large (15 %)",
+          "fixed_order": "Ordre fixe (plus gros d'abord)",
+          "parallel": "Parallèle (prorata, expérimental)"
+        }
+      },
+      "fondation_charge_strategy": {
+        "name": "Fondation : stratégie charge",
+        "state": {
+          "hysteresis": "Hystérésis (plus vide d'abord)",
+          "hysteresis_wide": "Hystérésis large (15 %)",
+          "fixed_order": "Ordre fixe (sans PV d'abord)",
+          "parallel": "Parallèle (prorata, expérimental)"
+        }
+      },
       "pass_mode": {
         "name": "Mode dérivation ( bypass )",
         "state": {

@@ -488,6 +488,24 @@
           "smart_fondation": "Smart Matching (fondation)"
         }
       },
+      "fondation_discharge_strategy": {
+        "name": "Fondation: discharge strategy",
+        "state": {
+          "hysteresis": "Hysteresis (fullest first)",
+          "hysteresis_wide": "Wide hysteresis (15%)",
+          "fixed_order": "Fixed order (largest first)",
+          "parallel": "Parallel (prorated, experimental)"
+        }
+      },
+      "fondation_charge_strategy": {
+        "name": "Fondation: charge strategy",
+        "state": {
+          "hysteresis": "Hysteresis (emptiest first)",
+          "hysteresis_wide": "Wide hysteresis (15%)",
+          "fixed_order": "Fixed order (no-PV first)",
+          "parallel": "Parallel (prorated, experimental)"
+        }
+      },
       "pass_mode": {
         "name": "Bypass Mode",
         "state": {

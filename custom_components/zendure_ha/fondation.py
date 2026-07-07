@@ -25,6 +25,7 @@ from .const import DeviceState, ManagerState
 from .device import ZendureDevice
 from .entity import EntityDevice
 from .number import ZendureRestoreNumber
+from .select import ZendureRestoreSelect
 from .sensor import ZendureSensor
 
 _LOGGER = logging.getLogger(__name__)
@@ -55,6 +56,9 @@ class FondationEngine:
         self.hl_ema: float | None = None       # EMA de house_load (décision de régime)
         self.pv_ema: dict[str, float] = {}     # EMA du PV par device (distribution)
         self.lead: dict[str, bool] = {}        # hystérésis sticky par device (décharge batterie)
+        self.clead: dict[str, bool] = {}       # hystérésis sticky par device (charge)
+        self.floor: dict[str, bool] = {}       # hystérésis de plancher SoC (sticky jusqu'à minSoc+3)
+        self.debug = ""                        # queue de ligne pour simulation.csv
 
     def createEntities(self) -> None:
         """Paramètres à chaud + capteurs d'observabilité, sur le device Manager."""
@@ -67,6 +71,12 @@ class FondationEngine:
         self.step = FondationNumber(m, "fondation_step", 120, 20, 300, "W")
         self.hyst_device = FondationNumber(m, "fondation_hyst_device", 5, 1, 20, "%")
         self.overhead = FondationNumber(m, "fondation_overhead", 50, 0, 150, "W")
+        # Stratégies de répartition (n'agissent qu'en mode smart_fondation ; le « combien » reste commun).
+        # Validées au banc sur 25 traces réelles : hysteresis/wide saines ; fixed_order OK avec l'hystérésis
+        # de plancher ; parallel = 0 permutation mais + de grid-charge transitoire sous bruit (expérimental).
+        strategies = {0: "hysteresis", 1: "hysteresis_wide", 2: "fixed_order", 3: "parallel"}
+        self.discharge_strategy = ZendureRestoreSelect(m, "fondation_discharge_strategy", dict(strategies), None)
+        self.charge_strategy = ZendureRestoreSelect(m, "fondation_charge_strategy", dict(strategies), None)
         self.sensor_state = ZendureSensor(m, "fondation_state")
         self.sensor_houseload = ZendureSensor(m, "fondation_house_load", None, "W", "power", "measurement", 0)
         self.sensor_integral = ZendureSensor(m, "fondation_integral", None, "W", "power", "measurement", 0)
@@ -137,42 +147,103 @@ class FondationEngine:
                 take = min(demand, ns)
                 cmd[d] = take
                 demand -= take
-            # 2) le reste sur les batteries : plus-plein-d'abord + hystérésis sticky (anti-permutation).
-            #    SOCEMPTY exclu (il passe déjà son PV à l'étape 1). SOCFULL participe : s'il ne livre
-            #    que son solaire (firmware), l'intégrateur P1 reporte le déficit sur le suivant.
-            hyst = self.hyst_device.asNumber
-            batt = [d for d in devices if d.state != DeviceState.SOCEMPTY]
-            batt.sort(key=lambda d: d.electricLevel.asInt + (hyst if self.lead.get(d.deviceId) else 0), reverse=True)
+            # 2) le reste sur les batteries selon la STRATÉGIE décharge.
+            #    SOCEMPTY exclu (il passe déjà son PV à l'étape 1) avec hystérésis de PLANCHER :
+            #    un device qui a touché minSoc reste exclu jusqu'à minSoc+3 (sinon fixed_order oscille
+            #    au plancher : vidé -> exclu -> remonte d'un poil -> reprend tout -> re-vidé).
+            #    SOCFULL participe : s'il ne livre que son solaire (firmware), l'intégrateur P1
+            #    reporte le déficit sur le suivant.
+            batt: list[ZendureDevice] = []
+            for d in devices:
+                if self.floor.get(d.deviceId):
+                    if d.state != DeviceState.SOCEMPTY and d.electricLevel.asInt > d.minSoc.asNumber + 3:
+                        self.floor[d.deviceId] = False
+                        batt.append(d)
+                elif d.state == DeviceState.SOCEMPTY:
+                    self.floor[d.deviceId] = True
+                else:
+                    batt.append(d)
             fuse_used: dict[object, float] = {}
-            for d in batt:
+            for d in devices:  # la part PV (étape 1) compte dans le budget du fusegroup
+                fuse_used[d.fuseGrp] = fuse_used.get(d.fuseGrp, 0.0) + cmd[d]
+
+            def dis_cap(d: ZendureDevice) -> float:
                 used = fuse_used.get(d.fuseGrp, 0.0)
-                cap = min(d.discharge_limit, d.fuseGrp.maxpower - used)
-                take = min(demand, max(0.0, cap - cmd[d]))
-                cmd[d] += take
-                demand -= take
-                fuse_used[d.fuseGrp] = used + cmd[d]
+                return max(0.0, min(d.discharge_limit, d.fuseGrp.maxpower - used) - cmd[d])
+
+            dstrat = self.discharge_strategy.value
+            if dstrat == 3:  # parallel : prorata SoC×capacité, reliquat en 2e passe
+                weights = {d: max(1.0, d.electricLevel.asInt * d.kWh) for d in batt}
+                total_w = sum(weights.values())
+                share = demand
+                for d in batt:
+                    take = min(share * weights[d] / total_w if total_w > 0 else 0.0, dis_cap(d))
+                    cmd[d] += take
+                    demand -= take
+                    fuse_used[d.fuseGrp] = fuse_used.get(d.fuseGrp, 0.0) + take
+                for d in batt:
+                    take = min(demand, dis_cap(d))
+                    cmd[d] += take
+                    demand -= take
+                    fuse_used[d.fuseGrp] = fuse_used.get(d.fuseGrp, 0.0) + take
+            else:
+                if dstrat == 2:  # fixed_order : capacité décroissante (le plus gros d'abord)
+                    batt.sort(key=lambda d: d.kWh, reverse=True)
+                else:            # hysteresis / hysteresis_wide : plus-plein-d'abord + sticky
+                    hyst = 15 if dstrat == 1 else self.hyst_device.asNumber
+                    batt.sort(key=lambda d: d.electricLevel.asInt + (hyst if self.lead.get(d.deviceId) else 0), reverse=True)
+                for d in batt:
+                    take = min(demand, dis_cap(d))
+                    cmd[d] += take
+                    demand -= take
+                    fuse_used[d.fuseGrp] = fuse_used.get(d.fuseGrp, 0.0) + take
             for d in devices:
                 ns = max(0.0, self.pv_ema[d.deviceId] - ovh)
                 self.lead[d.deviceId] = (cmd[d] - ns) > 5
+                self.clead[d.deviceId] = False
         elif self.regime == ManagerState.CHARGE:
             rem = max(0.0, -hl_raw) + self.integral
-            # sans-PV d'abord (garde la marge PV des producteurs), puis plus vide.
             # SOCFULL exclu ; bypass actif exclu (sa production n'est pas dispatchable).
             cand = [d for d in devices if d.state != DeviceState.SOCFULL and d.byPass.asInt == 0]
-            cand.sort(key=lambda d: (self.pv_ema.get(d.deviceId, 0.0) > 25.0, d.electricLevel.asInt))
             fuse_used = {}
-            for d in cand:
+
+            def chg_cap(d: ZendureDevice) -> float:
                 used = fuse_used.get(d.fuseGrp, 0.0)
-                cap = min(-d.charge_limit, -d.fuseGrp.minpower - used)
-                take = min(rem, max(0.0, cap))
-                cmd[d] = -take
-                rem -= take
-                fuse_used[d.fuseGrp] = used + take
+                return max(0.0, min(-d.charge_limit, -d.fuseGrp.minpower - used) + cmd[d])
+
+            cstrat = self.charge_strategy.value
+            if cstrat == 3:  # parallel : prorata place (100−SoC)×capacité, reliquat en 2e passe
+                weights = {d: max(1.0, (100 - d.electricLevel.asInt) * d.kWh) for d in cand}
+                total_w = sum(weights.values())
+                share = rem
+                for d in cand:
+                    take = min(share * weights[d] / total_w if total_w > 0 else 0.0, chg_cap(d))
+                    cmd[d] -= take
+                    rem -= take
+                    fuse_used[d.fuseGrp] = fuse_used.get(d.fuseGrp, 0.0) + take
+                for d in cand:
+                    take = min(rem, chg_cap(d))
+                    cmd[d] -= take
+                    rem -= take
+                    fuse_used[d.fuseGrp] = fuse_used.get(d.fuseGrp, 0.0) + take
+            else:
+                if cstrat == 2:  # fixed_order : sans-PV d'abord, puis le plus gros (garde la marge PV)
+                    cand.sort(key=lambda d: (self.pv_ema.get(d.deviceId, 0.0) > 25.0, -d.kWh))
+                else:            # hysteresis / hysteresis_wide : sans-PV d'abord, puis plus-vide + sticky
+                    hyst = 15 if cstrat == 1 else self.hyst_device.asNumber
+                    cand.sort(key=lambda d: (self.pv_ema.get(d.deviceId, 0.0) > 25.0, d.electricLevel.asInt - (hyst if self.clead.get(d.deviceId) else 0)))
+                for d in cand:
+                    take = min(rem, chg_cap(d))
+                    cmd[d] -= take
+                    rem -= take
+                    fuse_used[d.fuseGrp] = fuse_used.get(d.fuseGrp, 0.0) + take
             for d in devices:
                 self.lead[d.deviceId] = False
+                self.clead[d.deviceId] = cmd[d] < -5
         else:
             for d in devices:
                 self.lead[d.deviceId] = False
+                self.clead[d.deviceId] = False
 
         # --- application (gardes reprises du moteur 1.4.2 : bypass non stoppé, offgrid maintenu) ---
         setpoint = 0
@@ -194,6 +265,11 @@ class FondationEngine:
         self.sensor_integral.update_value(int(self.integral))
         self.sensor_setpoint.update_value(setpoint)
         self.manager.operationstate.update_value(self.regime.value)
+        self.manager.setpoint = setpoint
+        self.debug = (
+            f"fondation regime={self.regime.name} hl={int(hl_raw)} ema={int(hl_reg)}"
+            f" int={int(self.integral)} sp={setpoint} strat={self.discharge_strategy.value}/{self.charge_strategy.value}"
+        )
         _LOGGER.info(
             "Fondation => p1:%s house_load:%s (ema:%s) regime:%s integral:%s setpoint:%s",
             p1, int(hl_raw), int(hl_reg), self.regime.name, int(self.integral), setpoint,

@@ -92,6 +92,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         # Moteur alternatif « fondation » (mode d'opération smart_fondation) — n'altère pas le moteur existant
         self.fondation = FondationEngine(self)
+        self.setpoint = 0  # dernier setpoint du moteur actif (observabilité simulation.csv)
 
     async def loadDevices(self) -> None:
         if self.config_entry is None or (data := await Api.Connect(self.hass, dict(self.config_entry.data), True)) is None:
@@ -327,46 +328,72 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             self.p1meterEvent = None
 
     def writeSimulation(self, time: datetime, p1: int) -> None:
-        if Path("simulation.csv").exists() is False:
-            with Path("simulation.csv").open("w") as f:
-                f.write(
-                    "Time;P1;Operation;Battery;Solar;Home;SetPoint;--;"
-                    + ";".join(
-                        [
-                            f"bat;Prod;Home;{
-                                json.dumps(
-                                    DeviceSettings(
-                                        d.name,
-                                        d.fuseGrp.name,
-                                        d.charge_limit,
-                                        d.discharge_limit,
-                                        d.maxSolar,
-                                        d.kWh,
-                                        d.socSet.asNumber,
-                                        d.minSoc.asNumber,
-                                    ),
-                                    default=vars,
-                                )
-                            }"
-                            for d in self.devices
-                        ]
+        # Format ÉTENDU (identique au fork clean-base, compatible visualiseurs/outils de rejeu).
+        # Chemin explicite dans /config (le CWD de HA n'est pas garanti).
+        try:
+            path = Path(self.hass.config.path("simulation.csv"))
+            if path.exists() is False:
+                _LOGGER.info("Creating simulation log: %s", path)
+                with path.open("w") as f:
+                    f.write(
+                        "Time;P1;Operation;Battery;Solar;Home;SetPoint;--;"
+                        + ";".join(
+                            [
+                                f"bat;Prod;Home;Cmd;Soc;Conn;ChLim;St;Age;Grid;Byp;Tmp;CTmp;{
+                                    json.dumps(
+                                        DeviceSettings(
+                                            d.name,
+                                            d.fuseGrp.name,
+                                            d.charge_limit,
+                                            d.discharge_limit,
+                                            d.maxSolar,
+                                            d.kWh,
+                                            d.socSet.asNumber,
+                                            d.minSoc.asNumber,
+                                        ),
+                                        default=vars,
+                                    )
+                                }"
+                                for d in self.devices
+                            ]
+                        )
+                        + "\n"
                     )
-                    + "\n"
-                )
 
-        with Path("simulation.csv").open("a") as f:
-            data = ""
-            tbattery = 0
-            tsolar = 0
-            thome = 0
+            with path.open("a") as f:
+                data = ""
+                tbattery = 0
+                tsolar = 0
+                thome = 0
 
-            for d in self.devices:
-                tbattery += (pwr_battery := d.batteryOutput.asInt - d.batteryInput.asInt)
-                tsolar += (pwr_solar := d.solarInput.asInt)
-                thome += (pwr_home := d.homeOutput.asInt - d.homeInput.asInt)
-                data += f";{pwr_battery};{pwr_solar};{pwr_home};{d.electricLevel.asInt}"
+                for d in self.devices:
+                    tbattery += (pwr_battery := d.batteryOutput.asInt - d.batteryInput.asInt)
+                    tsolar += (pwr_solar := d.solarInput.asInt)
+                    thome += (pwr_home := d.homeOutput.asInt - d.homeInput.asInt)
+                    # Cmd = consigne manager AVANT clamp (à comparer à Home réalisé) ; St = DeviceState
+                    # (0=OFFLINE 1=SOCEMPTY 2=INACTIVE 3=SOCFULL 4=ACTIVE) ; Age = secondes depuis le dernier
+                    # message réel (-1 si jamais vu ; l'amont stampe lastseen = msg + 5 min).
+                    age = int((time - (d.lastseen - timedelta(minutes=5))).total_seconds()) if d.lastseen != datetime.min else -1
+                    # Grid = gridReverse (0=disabled 1=allow 2=forbidden ; -1 si non reçu) ; Byp = exports_bypass.
+                    gr = d.entities.get("gridReverse")
+                    grv = getattr(gr, "value", None) if gr is not None else None
+                    grid = grv if grv is not None else -1
+                    # Tmp = température onduleur, CTmp = température cellule max (BMS) ; "" si non publié.
+                    te = d.entities.get("hyperTmp")
+                    ce = d.entities.get("maxTemp")
+                    tmp = te.native_value if te is not None and getattr(te, "native_value", None) is not None else ""
+                    ctmp = ce.native_value if ce is not None and getattr(ce, "native_value", None) is not None else ""
+                    data += (
+                        f";{pwr_battery};{pwr_solar};{pwr_home};{d.cmd_target};{d.electricLevel.asInt}"
+                        f";{d.connectionStatus.asInt};{d.charge_limit};{d.state.value};{age};{grid};{int(d.exports_bypass)}"
+                        f";{tmp};{ctmp}"
+                    )
 
-            f.write(f"{time};{p1};{self.operation};{tbattery};{tsolar};{thome};{self.manualpower.asNumber};" + data + "\n")
+                # Queue de ligne debug du moteur fondation (colonne finale, ignorée par les parseurs).
+                tail = f";{self.fondation.debug}" if self.operation == ManagerMode.FONDATION else ""
+                f.write(f"{time};{p1};{self.operation};{tbattery};{tsolar};{thome};{self.setpoint};" + data + tail + "\n")
+        except Exception as err:
+            _LOGGER.error("writeSimulation: %s", err)
 
     async def _p1_changed(self, event: Event[EventStateChangedData]) -> None:
         # exit if there is nothing to do
@@ -488,6 +515,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         # push the setpoint below "p1 - real charge credits": with no device charging
         # and p1 >= 0, the result stays >= 0 — the #1151 guarantee holds structurally.
         setpoint -= self.discharge_bypass
+        self.setpoint = setpoint  # observabilité simulation.csv (aucun effet régulation)
 
         # Update power distribution.
         _LOGGER.info("P1 ======> p1:%s isFast:%s, setpoint:%sW stored:%sW", p1, isFast, setpoint, self.produced)
