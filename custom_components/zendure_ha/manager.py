@@ -316,9 +316,41 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.update_count += 1
         self.totalKwh.update_value(kwh)
 
+        # Reconnexion des devices muets (décrochage MQTT observé : glagla silencieuse 2 min,
+        # sortie figée, le moteur régulait dans le vide). Actions SÛRES uniquement.
+        self._mqtt_watchdog(time)
+
         # Manually update the timer
         if self.hass and self.hass.loop.is_running():
             self._schedule_refresh()
+
+    def _mqtt_watchdog(self, now: datetime) -> None:
+        """Reconnexion si un Zendure ne répond plus : re-souscription + demande d'état (getAll)
+        + reconnexion du broker s'il est tombé. N'altère PAS la régulation (aucune consigne)."""
+        from .api import Api
+
+        for d in self.devices:
+            if d.lastseen == datetime.min:
+                continue  # jamais vu / déjà marqué hors-ligne ailleurs
+            stale = (now - (d.lastseen - timedelta(minutes=5))).total_seconds()
+            if stale <= SmartMode.MQTT_STALE:
+                continue
+            _LOGGER.warning("Zendure %s muet depuis %ds -> reconnexion (re-souscription + getAll)", d.name, int(stale))
+            for client in (Api.mqttLocal, Api.mqttCloud):
+                if client is None:
+                    continue
+                try:
+                    if not client.is_connected():
+                        _LOGGER.warning("Broker MQTT déconnecté -> reconnect()")
+                        client.reconnect()
+                    client.subscribe(f"/{d.prodkey}/{d.deviceId}/#")
+                    client.subscribe(f"iot/{d.prodkey}/{d.deviceId}/#")
+                except Exception as err:
+                    _LOGGER.error("watchdog reconnexion %s: %s", d.name, err)
+            try:
+                d.mqttPublish(d.topic_read, {"properties": ["getAll"]}, d.mqtt or Api.mqttLocal)
+            except Exception as err:
+                _LOGGER.error("watchdog getAll %s: %s", d.name, err)
 
     def update_p1meter(self, p1meter: str | None) -> None:
         """Update the P1 meter sensor."""
