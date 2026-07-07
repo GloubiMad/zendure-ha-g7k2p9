@@ -287,6 +287,9 @@
       "fondation_house_load": {
         "name": "Fondation: house load"
       },
+      "fondation_forced": {
+        "name": "Fondation: forced solar dump (full)"
+      },
       "fondation_integral": {
         "name": "Fondation: integrator"
       },

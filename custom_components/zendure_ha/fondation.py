@@ -79,6 +79,7 @@ class FondationEngine:
         self.charge_strategy = ZendureRestoreSelect(m, "fondation_charge_strategy", dict(strategies), None)
         self.sensor_state = ZendureSensor(m, "fondation_state")
         self.sensor_houseload = ZendureSensor(m, "fondation_house_load", None, "W", "power", "measurement", 0)
+        self.sensor_forced = ZendureSensor(m, "fondation_forced", None, "W", "power", "measurement", 0)
         self.sensor_integral = ZendureSensor(m, "fondation_integral", None, "W", "power", "measurement", 0)
         self.sensor_setpoint = ZendureSensor(m, "fondation_setpoint", None, "W", "power", "measurement", 0)
 
@@ -93,11 +94,41 @@ class FondationEngine:
         # --- house_load mesuré (invariant) ---
         house_net = sum(d.homeOutput.asInt - d.homeInput.asInt for d in devices)
         hl_raw = float(p1 + house_net)
+        ovh = self.overhead.asNumber
+
+        # --- pv-EMA par device (lisse le PV utilisé partout, sans lisser le total) ---
+        palpha = max(0.05, min(1.0, self.pv_alpha.asNumber / 100.0))
+        for d in devices:
+            solar = float(d.solarInput.asInt)
+            prev = self.pv_ema.get(d.deviceId)
+            self.pv_ema[d.deviceId] = solar if prev is None else palpha * solar + (1.0 - palpha) * prev
+
+        # --- DÉVERSEMENT FORCÉ des producteurs PLEINS (gestion SOCFULL) ---
+        # Un producteur SOCFULL ne peut pas stocker son solaire : il le pousse de force vers la
+        # maison (et au réseau si non absorbé), quelle que soit la consigne. On le retire de la
+        # demande CONTRÔLABLE : T* = house_load − déversement forcé. Si T* < 0, ce surplus doit
+        # être ABSORBÉ en CHARGEANT les batteries non-pleines (au lieu d'exporter). C'était LE
+        # trou du moteur : sans ça, house_load reste positif (invariant) → décharge en boucle → export.
+        # forced : selon gridReverse du device (exports_bypass = autorisé/désactivé, sinon interdit).
+        #  - AUTORISÉ (dump libre) : forced = solaire passthrough THÉORIQUE (instantané, pas de lag)
+        #    -> up absorbe le surplus, export seulement si up saturé/plein.
+        #  - INTERDIT (écrête) : forced = déversement MESURÉ (le device curtaile) -> pas de sur-charge
+        #    depuis le réseau. Le surplus est écrêté au lieu d'être stocké.
+        forced = 0.0
+        for d in devices:
+            if d.state != DeviceState.SOCFULL or self.pv_ema[d.deviceId] <= 0:
+                continue
+            passthrough = max(0.0, self.pv_ema[d.deviceId] - ovh)
+            if d.exports_bypass:
+                forced += passthrough
+            else:
+                forced += min(passthrough, float(max(0, d.homeOutput.asInt - d.homeInput.asInt)))
+        t_raw = hl_raw - forced
 
         # --- split-EMA : le régime décide sur le LISSÉ, les montants sur le BRUT ---
         alpha = max(0.05, min(1.0, self.hl_alpha.asNumber / 100.0))
-        self.hl_ema = hl_raw if self.hl_ema is None else alpha * hl_raw + (1.0 - alpha) * self.hl_ema
-        hl_reg = self.hl_ema
+        self.hl_ema = t_raw if self.hl_ema is None else alpha * t_raw + (1.0 - alpha) * self.hl_ema
+        t_reg = self.hl_ema
         db_on = self.db_on.asNumber
         db_off = self.db_off.asNumber
         ft = self.fast_track.asNumber
@@ -105,15 +136,15 @@ class FondationEngine:
         # --- machine à états avec hystérésis + fast-track (brut au-delà de ±ft => immédiat) ---
         match self.regime:
             case ManagerState.IDLE:
-                if hl_reg > db_on or hl_raw > ft:
+                if t_reg > db_on or t_raw > ft:
                     self.regime = ManagerState.DISCHARGE
-                elif hl_reg < -db_on or hl_raw < -ft:
+                elif t_reg < -db_on or t_raw < -ft:
                     self.regime = ManagerState.CHARGE
             case ManagerState.DISCHARGE:
-                if hl_reg < db_off or hl_raw < -ft:
+                if t_reg < db_off or t_raw < -ft:
                     self.regime = ManagerState.IDLE
             case ManagerState.CHARGE:
-                if hl_reg > -db_off or hl_raw > ft:
+                if t_reg > -db_off or t_raw > ft:
                     self.regime = ManagerState.IDLE
 
         # --- intégrateur P1 (comble l'écart commande↔livré ; borné, anti-windup) ---
@@ -131,20 +162,16 @@ class FondationEngine:
         elif p1 > db_off:
             self.integral = max(0.0, self.integral - step)
 
-        # --- pv-EMA par device (lisse le PV utilisé dans la DISTRIBUTION, pas le total) ---
-        palpha = max(0.05, min(1.0, self.pv_alpha.asNumber / 100.0))
-        for d in devices:
-            solar = float(d.solarInput.asInt)
-            prev = self.pv_ema.get(d.deviceId)
-            self.pv_ema[d.deviceId] = solar if prev is None else palpha * solar + (1.0 - palpha) * prev
-
-        # --- consignes ---
-        ovh = self.overhead.asNumber
+        # --- consignes (sur la demande CONTRÔLABLE t_raw, pas house_load) ---
         cmd: dict[ZendureDevice, float] = dict.fromkeys(devices, 0.0)
         if self.regime == ManagerState.DISCHARGE:
-            demand = max(0.0, hl_raw) + self.integral
-            # 1) le PV des producteurs d'abord (gratuit, ne vide pas les batteries)
+            demand = max(0.0, t_raw) + self.integral
+            # 1) le PV des producteurs NON pleins d'abord (gratuit, ne vide pas les batteries).
+            #    Les SOCFULL sont exclus : leur PV est déjà déversé de force (compté dans forced),
+            #    le re-commander ici le compterait deux fois.
             for d in devices:
+                if d.state == DeviceState.SOCFULL:
+                    continue
                 ns = max(0.0, self.pv_ema[d.deviceId] - ovh)
                 take = min(demand, ns)
                 cmd[d] = take
@@ -204,8 +231,9 @@ class FondationEngine:
                 self.lead[d.deviceId] = (cmd[d] - ns) > 5
                 self.clead[d.deviceId] = False
         elif self.regime == ManagerState.CHARGE:
-            rem = max(0.0, -hl_raw) + self.integral
-            # SOCFULL exclu ; bypass actif exclu (sa production n'est pas dispatchable).
+            rem = max(0.0, -t_raw) + self.integral
+            # SOCFULL exclu (c'est LUI qui déverse le surplus qu'on absorbe) ;
+            # bypass actif exclu (sa production n'est pas dispatchable).
             cand = [d for d in devices if d.state != DeviceState.SOCFULL and d.byPass.asInt == 0]
             fuse_used = {}
 
@@ -264,13 +292,15 @@ class FondationEngine:
         # --- observabilité ---
         self.sensor_state.update_value(self.regime.value)
         self.sensor_houseload.update_value(int(hl_raw))
+        self.sensor_forced.update_value(int(forced))
         self.sensor_integral.update_value(int(self.integral))
         self.sensor_setpoint.update_value(setpoint)
         self.manager.operationstate.update_value(self.regime.value)
         self.manager.setpoint = setpoint
         self.debug = (
-            f"fondation regime={self.regime.name} hl={int(hl_raw)} ema={int(hl_reg)}"
-            f" int={int(self.integral)} sp={setpoint} strat={self.discharge_strategy.value}/{self.charge_strategy.value}"
+            f"fondation regime={self.regime.name} hl={int(hl_raw)} forced={int(forced)} T={int(t_raw)}"
+            f" ema={int(t_reg)} int={int(self.integral)} sp={setpoint}"
+            f" strat={self.discharge_strategy.value}/{self.charge_strategy.value}"
         )
         _LOGGER.info(
             "Fondation => p1:%s house_load:%s (ema:%s) regime:%s integral:%s setpoint:%s",
