@@ -109,17 +109,20 @@ class FondationEngine:
         # demande CONTRÔLABLE : T* = house_load − déversement forcé. Si T* < 0, ce surplus doit
         # être ABSORBÉ en CHARGEANT les batteries non-pleines (au lieu d'exporter). C'était LE
         # trou du moteur : sans ça, house_load reste positif (invariant) → décharge en boucle → export.
-        # forced : selon gridReverse du device (exports_bypass = autorisé/désactivé, sinon interdit).
-        #  - AUTORISÉ (dump libre) : forced = solaire passthrough THÉORIQUE (instantané, pas de lag)
-        #    -> up absorbe le surplus, export seulement si up saturé/plein.
-        #  - INTERDIT (écrête) : forced = déversement MESURÉ (le device curtaile) -> pas de sur-charge
-        #    depuis le réseau. Le surplus est écrêté au lieu d'être stocké.
+        # forced : selon le MODE gridReverse envoyé au firmware du device (0=désactivé 1=autorisé 2=interdit).
+        #  - AUTORISÉ (1, dump libre) : le firmware sort TOUT le solaire -> forced = passthrough THÉORIQUE
+        #    (instantané, pas de lag). up absorbe le surplus ; export seulement si up saturé/plein.
+        #  - DÉSACTIVÉ (0) ou INTERDIT (2) : le firmware ÉCRÊTE le solaire pour ne PAS exporter
+        #    -> forced = déversement MESURÉ (suit l'écrêtage). Pas de sur-charge depuis le réseau ;
+        #    le surplus est écrêté au lieu d'être stocké. (par défaut = mesuré, prudent, si mode inconnu.)
         forced = 0.0
         for d in devices:
             if d.state != DeviceState.SOCFULL or self.pv_ema[d.deviceId] <= 0:
                 continue
             passthrough = max(0.0, self.pv_ema[d.deviceId] - ovh)
-            if d.exports_bypass:
+            gr = d.entities.get("gridReverse")
+            allow = getattr(gr, "value", None) == 1 if gr is not None else False
+            if allow:
                 forced += passthrough
             else:
                 forced += min(passthrough, float(max(0, d.homeOutput.asInt - d.homeInput.asInt)))
