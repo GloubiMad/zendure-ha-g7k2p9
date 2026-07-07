@@ -229,8 +229,12 @@ class FondationEngine:
                 fuse_used[d.fuseGrp] = fuse_used.get(d.fuseGrp, 0.0) + cmd[d]
 
             def dis_cap(d: ZendureDevice) -> float:
+                # capacité de décharge ENCORE disponible pour d : min(marge device, marge fusegroup).
+                # BUG corrigé : `used` inclut DÉJÀ cmd[d] (le PV de l'étape 1) -> l'ancienne formule
+                # `min(limit, maxpower-used) - cmd[d]` soustrayait le PV DEUX FOIS quand le fusegroup
+                # était contraint (maxpower≈limit), bloquant la décharge batterie d'un producteur.
                 used = fuse_used.get(d.fuseGrp, 0.0)
-                return max(0.0, min(d.discharge_limit, d.fuseGrp.maxpower - used) - cmd[d])
+                return max(0.0, min(d.discharge_limit - cmd[d], d.fuseGrp.maxpower - used))
 
             dstrat = self.discharge_strategy.value
             if dstrat == 3:  # parallel : prorata SoC×capacité, reliquat en 2e passe
@@ -399,7 +403,7 @@ class FondationEngine:
             batt.sort(key=lambda d: d.electricLevel.asInt, reverse=True)
             for d in batt:
                 used = fuse_used.get(d.fuseGrp, 0.0)
-                cap = max(0.0, min(d.discharge_limit, d.fuseGrp.maxpower - used) - cmd[d])
+                cap = max(0.0, min(d.discharge_limit - cmd[d], d.fuseGrp.maxpower - used))
                 take = min(deficit, cap)
                 cmd[d] += take
                 deficit -= take
