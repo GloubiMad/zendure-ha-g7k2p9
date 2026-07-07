@@ -71,6 +71,9 @@
     "button": {
       "mqtt_reset": {
         "name": "Reset connexion"
+      },
+      "simulation_rotate": {
+        "name": "Rotation du log simulation"
       }
     },
     "binary_sensor": {
@@ -515,6 +518,9 @@
       },
       "fanmode": {
         "name": "Ventilateur intelligent"
+      },
+      "simulation_log": {
+        "name": "Log simulation (à chaud)"
       }
     }
   },

@@ -25,6 +25,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.loader import async_get_integration
 
 from .api import Api
+from .button import ZendureButton
 from .const import (
     CONF_AUTO_MQTT_USER,
     CONF_P1METER,
@@ -41,6 +42,7 @@ from .fusegroup import FuseGroup
 from .number import ZendureRestoreNumber
 from .select import ZendureRestoreSelect, ZendureSelect
 from .sensor import ZendureSensor
+from .switch import ZendureSwitch
 
 SCAN_INTERVAL = timedelta(seconds=60)
 
@@ -117,6 +119,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         )
         self.operationstate = ZendureSensor(self, "operation_state")
         self.fondation.createEntities()
+        # Simulation : switch LIVE (sans reload, en plus de l'option config) + bouton rotate
+        self.simulationSwitch = ZendureSwitch(self, "simulation_log", self.update_simulation, None, None, ZendureManager.simulation)
+        self.simulationRotate = ZendureButton(self, "simulation_rotate", self.rotate_simulation)
         self.manualpower = ZendureRestoreNumber(self, "manual_power", None, None, "W", "power", 12000, -12000, NumberMode.BOX, True)
         self.availableKwh = ZendureSensor(self, "available_kwh", None, "kWh", "energy_storage", None, 1)
         self.totalKwh = ZendureSensor(self, "total_kwh", None, "kWh", "energy_storage", "measurement", 2)
@@ -327,6 +332,23 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         else:
             self.p1meterEvent = None
 
+    async def update_simulation(self, entity: ZendureSwitch, value: Any) -> None:
+        """Active/désactive le log simulation À CHAUD (sans reload de l'intégration)."""
+        ZendureManager.simulation = bool(value)
+        entity.update_value(int(bool(value)))
+        _LOGGER.info("Simulation log => %s", ZendureManager.simulation)
+
+    async def rotate_simulation(self, _button: ZendureButton) -> None:
+        """Renomme simulation.csv en simulation_YYYYMMDD_HHMMSS.csv ; un nouveau est créé au prochain cycle."""
+        try:
+            path = Path(self.hass.config.path("simulation.csv"))
+            if path.exists():
+                newname = path.with_name(f"simulation_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+                path.rename(newname)
+                _LOGGER.info("Simulation log rotated => %s", newname)
+        except Exception as err:
+            _LOGGER.error("rotate_simulation: %s", err)
+
     def writeSimulation(self, time: datetime, p1: int) -> None:
         # Format ÉTENDU (identique au fork clean-base, compatible visualiseurs/outils de rejeu).
         # Chemin explicite dans /config (le CWD de HA n'est pas garanti).
@@ -343,7 +365,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                                     json.dumps(
                                         DeviceSettings(
                                             d.name,
-                                            d.fuseGrp.name,
+                                            # fuseGrp n'est PAS assigné pour un device hors fusegroup
+                                            # (annotation sans valeur dans device.py) -> ne pas crasher.
+                                            fg.name if (fg := getattr(d, 'fuseGrp', None)) is not None else '-',
                                             d.charge_limit,
                                             d.discharge_limit,
                                             d.maxSolar,
@@ -394,6 +418,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 f.write(f"{time};{p1};{self.operation};{tbattery};{tsolar};{thome};{self.setpoint};" + data + tail + "\n")
         except Exception as err:
             _LOGGER.error("writeSimulation: %s", err)
+            _LOGGER.error(traceback.format_exc())
 
     async def _p1_changed(self, event: Event[EventStateChangedData]) -> None:
         # exit if there is nothing to do

@@ -84,7 +84,9 @@ class FondationEngine:
 
     async def update(self, p1: int) -> None:
         """Un cycle de régulation. Appelé par powerChanged quand operation == FONDATION."""
-        devices: list[ZendureDevice] = [d for d in self.manager.devices if d.state != DeviceState.OFFLINE]
+        # fuseGrp n'est pas assigné pour un device hors fusegroup (annotation sans valeur
+        # dans device.py) -> l'exclure du moteur au lieu de crasher sur les caps.
+        devices: list[ZendureDevice] = [d for d in self.manager.devices if d.state != DeviceState.OFFLINE and getattr(d, "fuseGrp", None) is not None]
         if not devices:
             return
 
