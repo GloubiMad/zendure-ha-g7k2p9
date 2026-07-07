@@ -103,7 +103,7 @@ class FondationEngine:
         db_off = self.db_off.asNumber
         ft = self.fast_track.asNumber
         step = self.step.asNumber
-        imax = 2 * sum(d.discharge_limit for d in devices)
+        imax = sum(d.discharge_limit for d in devices)
 
         # --- pv-EMA par device (lisse le PV utilisé partout, sans lisser le total) ---
         palpha = max(0.05, min(1.0, self.pv_alpha.asNumber / 100.0))
@@ -179,20 +179,27 @@ class FondationEngine:
                 if t_reg > -db_off or t_raw > ft:
                     self.regime = ManagerState.IDLE
 
-        # --- intégrateur P1 (comble l'écart commande↔livré ; borné, anti-windup) ---
+        # --- intégrateur P1 avec ANTI-WINDUP ---
+        # ANTI-WINDUP : ne PAS accumuler l'intégrale quand la sortie est SATURÉE (tous les Hyper au
+        # max/min). Sinon elle gonfle inutilement (1560 W observé terrain) et, quand la conso chute
+        # d'un coup, met ~90 s à se vider = gros export transitoire. Gelée si saturé => la consigne
+        # (feedforward) suit house_load instantanément. Validé en simu : pic 110 s -> 0, sans flip-flap.
+        # VIDANGE modérée (jusqu'à 2×step) sur l'écart opposé pour effacer tout résidu.
         step = self.step.asNumber
-        imax = 2 * sum(d.discharge_limit for d in devices)
+        imax = sum(d.discharge_limit for d in devices)
+        sat_dis = house_net >= imax - db_on                             # déchargé à fond
+        sat_chg = house_net <= sum(d.charge_limit for d in devices) + db_on  # chargé à fond
         if self.regime == ManagerState.IDLE:
             self.integral = 0.0
         elif self.regime == ManagerState.DISCHARGE:
-            if p1 > db_off:
+            if p1 > db_off and not sat_dis:
                 self.integral = min(self.integral + min(p1, step), imax)
             elif p1 < -db_off:
-                self.integral = max(0.0, self.integral - step)
-        elif p1 < -db_off:
+                self.integral = max(0.0, self.integral - max(step, min(-p1, 2 * step)))
+        elif p1 < -db_off and not sat_chg:
             self.integral = min(self.integral + min(-p1, step), imax)
         elif p1 > db_off:
-            self.integral = max(0.0, self.integral - step)
+            self.integral = max(0.0, self.integral - max(step, min(p1, 2 * step)))
 
         # --- consignes (sur la demande CONTRÔLABLE t_raw, pas house_load) ---
         cmd: dict[ZendureDevice, float] = dict.fromkeys(devices, 0.0)
@@ -358,10 +365,14 @@ class FondationEngine:
                 self.lead[d.deviceId] = False
                 self.clead[d.deviceId] = False
             return forced, base, base
-        # intégrateur P1 signé (résiduel overhead/rampe) : P1>0 import -> +sortie ; P1<0 export -> -sortie
-        if p1 > db_off:
+        # intégrateur P1 signé (résiduel overhead/rampe) avec ANTI-WINDUP : P1>0 import -> +sortie ;
+        # P1<0 export -> -sortie ; mais on n'accumule PAS dans une direction déjà saturée.
+        delivered = sum(d.homeOutput.asInt - d.homeInput.asInt for d in devices)
+        sat_dis = delivered >= sum(d.discharge_limit for d in devices) - db_off
+        sat_chg = delivered <= sum(d.charge_limit for d in devices) + db_off
+        if p1 > db_off and not sat_dis:
             self.integral = min(self.integral + min(p1, step), imax)
-        elif p1 < -db_off:
+        elif p1 < -db_off and not sat_chg:
             self.integral = max(-imax, self.integral - min(-p1, step))
         surplus = forced - base
         if surplus > 0:
