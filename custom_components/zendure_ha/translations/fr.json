@@ -102,6 +102,30 @@
       },
       "soc_set": {
         "name": "SOC maximum"
+      },
+      "fondation_db_on": {
+        "name": "Fondation : seuil d'engagement"
+      },
+      "fondation_db_off": {
+        "name": "Fondation : seuil de coupure"
+      },
+      "fondation_fast_track": {
+        "name": "Fondation : seuil fast-track"
+      },
+      "fondation_hl_alpha": {
+        "name": "Fondation : lissage house load (alpha %)"
+      },
+      "fondation_pv_alpha": {
+        "name": "Fondation : lissage solaire (alpha %)"
+      },
+      "fondation_step": {
+        "name": "Fondation : pas de l'intégrateur"
+      },
+      "fondation_hyst_device": {
+        "name": "Fondation : hystérésis device"
+      },
+      "fondation_overhead": {
+        "name": "Fondation : overhead onduleur"
       }
     },
     "sensor": {
@@ -215,6 +239,23 @@
           "2": "En décharge",
           "3": "Éteint"
         }
+      },
+      "fondation_state": {
+        "name": "Fondation : régime",
+        "state": {
+          "0": "En veille",
+          "1": "En charge",
+          "2": "En décharge"
+        }
+      },
+      "fondation_house_load": {
+        "name": "Fondation : house load"
+      },
+      "fondation_integral": {
+        "name": "Fondation : intégrateur"
+      },
+      "fondation_setpoint": {
+        "name": "Fondation : setpoint"
       },
       "state": {
         "name": "État",
@@ -404,7 +445,8 @@
           "smart": "Couplage intelligent",
           "smart_discharging": "Décharge intelligente",
           "smart_charging": "Charge intelligente",
-          "store_solar": "Stocker le solaire"
+          "store_solar": "Stocker le solaire",
+          "smart_fondation": "Régulation intelligente (fondation)"
         }
       },
       "pass_mode": {

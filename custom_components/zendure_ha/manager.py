@@ -36,6 +36,7 @@ from .const import (
 )
 from .device import DeviceSettings, ZendureDevice, ZendureLegacy
 from .entity import EntityDevice
+from .fondation import FondationEngine
 from .fusegroup import FuseGroup
 from .number import ZendureRestoreNumber
 from .select import ZendureRestoreSelect, ZendureSelect
@@ -89,6 +90,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.produced = 0
         self.pwr_low = 0
 
+        # Moteur alternatif « fondation » (mode d'opération smart_fondation) — n'altère pas le moteur existant
+        self.fondation = FondationEngine(self)
+
     async def loadDevices(self) -> None:
         if self.config_entry is None or (data := await Api.Connect(self.hass, dict(self.config_entry.data), True)) is None:
             return
@@ -103,9 +107,15 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.attr_device_info["sw_version"] = integration.manifest.get("version", "unknown")
 
         self.operationmode = (
-            ZendureRestoreSelect(self, "Operation", {0: "off", 1: "manual", 2: "smart", 3: "smart_discharging", 4: "smart_charging", 5: "store_solar"}, self.update_operation),
+            ZendureRestoreSelect(
+                self,
+                "Operation",
+                {0: "off", 1: "manual", 2: "smart", 3: "smart_discharging", 4: "smart_charging", 5: "store_solar", 6: "smart_fondation"},
+                self.update_operation,
+            ),
         )
         self.operationstate = ZendureSensor(self, "operation_state")
+        self.fondation.createEntities()
         self.manualpower = ZendureRestoreNumber(self, "manual_power", None, None, "W", "power", 12000, -12000, NumberMode.BOX, True)
         self.availableKwh = ZendureSensor(self, "available_kwh", None, "kWh", "energy_storage", None, 1)
         self.totalKwh = ZendureSensor(self, "total_kwh", None, "kWh", "energy_storage", "measurement", 2)
@@ -506,6 +516,11 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     await self.power_discharge(setpoint)
                 else:
                     await self.power_charge(setpoint, time)
+
+            case ManagerMode.FONDATION:
+                # Moteur alternatif « fondation » : régulation complète depuis le p1 brut,
+                # ignore les crédits/setpoint calculés ci-dessus (house_load mesuré en interne).
+                await self.fondation.update(p1)
 
             case ManagerMode.OFF:
                 self.operationstate.update_value(ManagerState.OFF.value)

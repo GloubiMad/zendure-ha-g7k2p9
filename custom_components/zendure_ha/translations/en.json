@@ -112,6 +112,30 @@
       },
       "soc_set": {
         "name": "Target SoC"
+      },
+      "fondation_db_on": {
+        "name": "Fondation: engage threshold"
+      },
+      "fondation_db_off": {
+        "name": "Fondation: release threshold"
+      },
+      "fondation_fast_track": {
+        "name": "Fondation: fast-track threshold"
+      },
+      "fondation_hl_alpha": {
+        "name": "Fondation: house load smoothing (alpha %)"
+      },
+      "fondation_pv_alpha": {
+        "name": "Fondation: solar smoothing (alpha %)"
+      },
+      "fondation_step": {
+        "name": "Fondation: integrator step"
+      },
+      "fondation_hyst_device": {
+        "name": "Fondation: device hysteresis"
+      },
+      "fondation_overhead": {
+        "name": "Fondation: inverter overhead"
       }
     },
     "sensor": {
@@ -248,6 +272,23 @@
           "2": "Discharging",
           "3": "Off"
         }
+      },
+      "fondation_state": {
+        "name": "Fondation: regime",
+        "state": {
+          "0": "Idle",
+          "1": "Charging",
+          "2": "Discharging"
+        }
+      },
+      "fondation_house_load": {
+        "name": "Fondation: house load"
+      },
+      "fondation_integral": {
+        "name": "Fondation: integrator"
+      },
+      "fondation_setpoint": {
+        "name": "Fondation: setpoint"
       },
       "state": {
         "name": "State",
@@ -443,7 +484,8 @@
           "smart": "Smart Matching",
           "smart_discharging": "Smart discharge only",
           "smart_charging": "Smart charge only",
-          "store_solar": "Store Solar"
+          "store_solar": "Store Solar",
+          "smart_fondation": "Smart Matching (fondation)"
         }
       },
       "pass_mode": {
