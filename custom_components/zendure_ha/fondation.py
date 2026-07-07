@@ -59,6 +59,10 @@ class FondationEngine:
         self.clead: dict[str, bool] = {}       # hystérésis sticky par device (charge)
         self.floor: dict[str, bool] = {}       # hystérésis de plancher SoC (sticky jusqu'à minSoc+3)
         self.debug = ""                        # queue de ligne pour simulation.csv
+        # Comportement producteur plein : False=STORE (stocke le surplus dans les batteries, écrête
+        # le reste) ; True=BLOCK (rien ne sort, maison sur réseau). Le mapping vers un mode gridReverse
+        # sera câblé plus tard (#1 = nommer les modes). Défaut STORE (le cas utile, validé).
+        self._socfull_block = False
 
     def createEntities(self) -> None:
         """Paramètres à chaud + capteurs d'observabilité, sur le device Manager."""
@@ -95,6 +99,11 @@ class FondationEngine:
         house_net = sum(d.homeOutput.asInt - d.homeInput.asInt for d in devices)
         hl_raw = float(p1 + house_net)
         ovh = self.overhead.asNumber
+        db_on = self.db_on.asNumber
+        db_off = self.db_off.asNumber
+        ft = self.fast_track.asNumber
+        step = self.step.asNumber
+        imax = 2 * sum(d.discharge_limit for d in devices)
 
         # --- pv-EMA par device (lisse le PV utilisé partout, sans lisser le total) ---
         palpha = max(0.05, min(1.0, self.pv_alpha.asNumber / 100.0))
@@ -103,6 +112,26 @@ class FondationEngine:
             prev = self.pv_ema.get(d.deviceId)
             self.pv_ema[d.deviceId] = solar if prev is None else palpha * solar + (1.0 - palpha) * prev
 
+        cmd: dict[ZendureDevice, float] = dict.fromkeys(devices, 0.0)
+
+        # === CONTRÔLE DIRECT (modèle 1.3, confirmé terrain) ===
+        # Sans CT, un Hyper OBÉIT à la consigne de sortie en mode désactivé(0)/interdit(2) : il écrête
+        # son solaire pour sortir exactement ce qu'on demande (obs. terrain : 311 W). En autorisé(1) il
+        # IGNORE la consigne et déverse tout (là on retombe sur l'anti-flap ci-dessous). Donc quand un
+        # producteur est PLEIN et pilotable, on ne « déverse+absorbe » pas : on COMMANDE sa sortie =
+        # conso + ce que les batteries peuvent encaisser, et on ÉCRÊTE le reste (0 export). Validé en
+        # simu (tools/fondation3.py) : sur la vraie trace, |P1| moyen 0 W, export 0 %.
+        def _obeys(d: ZendureDevice) -> bool:
+            gr = d.entities.get("gridReverse")
+            return getattr(gr, "value", None) in (0, 2)  # désactivé/interdit obéissent ; autorisé déverse
+
+        full_prod = [d for d in devices if d.state == DeviceState.SOCFULL and (self.pv_ema[d.deviceId] - ovh) > 0]
+        if full_prod and all(_obeys(d) for d in full_prod):
+            forced, t_raw, t_reg = self._direct_control(devices, full_prod, hl_raw, ovh, p1, cmd, db_off, step, imax)
+            await self._apply_and_report(devices, cmd, hl_raw, forced, t_raw, t_reg, p1)
+            return
+
+        # === sinon : ANTI-FLAP (producteur non plein, ou plein en AUTORISÉ qui déverse) ===
         # --- DÉVERSEMENT FORCÉ des producteurs PLEINS (gestion SOCFULL) ---
         # Un producteur SOCFULL ne peut pas stocker son solaire : il le pousse de force vers la
         # maison (et au réseau si non absorbé), quelle que soit la consigne. On le retire de la
@@ -278,6 +307,9 @@ class FondationEngine:
                 self.lead[d.deviceId] = False
                 self.clead[d.deviceId] = False
 
+        await self._apply_and_report(devices, cmd, hl_raw, forced, t_raw, t_reg, p1)
+
+    async def _apply_and_report(self, devices, cmd, hl_raw, forced, t_raw, t_reg, p1) -> None:
         # --- application (gardes reprises du moteur 1.4.2 : bypass non stoppé, offgrid maintenu) ---
         setpoint = 0
         for d in devices:
@@ -306,6 +338,73 @@ class FondationEngine:
             f" strat={self.discharge_strategy.value}/{self.charge_strategy.value}"
         )
         _LOGGER.info(
-            "Fondation => p1:%s house_load:%s (ema:%s) regime:%s integral:%s setpoint:%s",
-            p1, int(hl_raw), int(hl_reg), self.regime.name, int(self.integral), setpoint,
+            "Fondation => p1:%s house_load:%s regime:%s forced:%s integral:%s setpoint:%s",
+            p1, int(hl_raw), self.regime.name, int(forced), int(self.integral), setpoint,
         )
+
+    def _direct_control(self, devices, full_prod, base, ovh, p1, cmd, db_off, step, imax):
+        """Producteur(s) plein(s) qui OBÉISSENT : on commande leur sortie = conso + charge encaissable,
+        on écrête le reste (0 export). Généralisé à N entités de stockage (parc futur)."""
+        forced = sum(max(0.0, self.pv_ema[d.deviceId] - ovh) for d in full_prod)  # solaire dispo des pleins
+        if self._socfull_block:
+            # BLOCK (#3) : producteur plein -> RIEN ne sort (maison sur réseau, 0 export). Peu utile.
+            self.regime = ManagerState.IDLE
+            self.integral = 0.0
+            for d in devices:
+                self.lead[d.deviceId] = False
+                self.clead[d.deviceId] = False
+            return forced, base, base
+        # intégrateur P1 signé (résiduel overhead/rampe) : P1>0 import -> +sortie ; P1<0 export -> -sortie
+        if p1 > db_off:
+            self.integral = min(self.integral + min(p1, step), imax)
+        elif p1 < -db_off:
+            self.integral = max(-imax, self.integral - min(-p1, step))
+        surplus = forced - base
+        if surplus > 0:
+            # STORE : stocker le surplus dans les batteries non-pleines (charge_strategy), écrêter le reste
+            self.regime = ManagerState.CHARGE
+            sinks = [d for d in devices if d.state != DeviceState.SOCFULL and d.byPass.asInt == 0 and d.electricLevel.asInt < 100]
+            if self.charge_strategy.value == 2:  # fixed_order : sans-PV d'abord, puis le plus gros
+                sinks.sort(key=lambda d: (self.pv_ema.get(d.deviceId, 0.0) > 25.0, -d.kWh))
+            else:                                 # sans-PV d'abord, puis plus-vide
+                sinks.sort(key=lambda d: (self.pv_ema.get(d.deviceId, 0.0) > 25.0, d.electricLevel.asInt))
+            fuse_used: dict[object, float] = {}
+
+            def chg_cap(d: ZendureDevice) -> float:
+                used = fuse_used.get(d.fuseGrp, 0.0)
+                return max(0.0, min(-d.charge_limit, -d.fuseGrp.minpower - used))
+
+            cap = sum(chg_cap(d) for d in sinks)
+            total_charge = max(0.0, min(surplus, cap))   # feedforward : ce que les batteries encaissent
+            out = max(0.0, base + total_charge + self.integral)  # sortie producteurs + trim résiduel (P1>0 import -> +)
+            for d in full_prod:
+                take = min(out, max(0.0, self.pv_ema[d.deviceId] - ovh), float(d.discharge_limit))
+                cmd[d] = take
+                out -= take
+            rem = total_charge
+            for d in sinks:
+                take = min(rem, chg_cap(d))
+                cmd[d] = -take
+                rem -= take
+                fuse_used[d.fuseGrp] = fuse_used.get(d.fuseGrp, 0.0) + take
+        else:
+            # DÉFICIT : les pleins sortent tout leur solaire, les batteries fournissent le reste
+            self.regime = ManagerState.DISCHARGE
+            fuse_used = {}
+            for d in full_prod:
+                cmd[d] = min(max(0.0, self.pv_ema[d.deviceId] - ovh), float(d.discharge_limit))
+                fuse_used[d.fuseGrp] = fuse_used.get(d.fuseGrp, 0.0) + cmd[d]
+            deficit = max(0.0, base - forced + self.integral)
+            batt = [d for d in devices if d not in full_prod and d.electricLevel.asInt > d.minSoc.asNumber]
+            batt.sort(key=lambda d: d.electricLevel.asInt, reverse=True)
+            for d in batt:
+                used = fuse_used.get(d.fuseGrp, 0.0)
+                cap = max(0.0, min(d.discharge_limit, d.fuseGrp.maxpower - used) - cmd[d])
+                take = min(deficit, cap)
+                cmd[d] += take
+                deficit -= take
+                fuse_used[d.fuseGrp] = used + take
+        for d in devices:
+            self.lead[d.deviceId] = False
+            self.clead[d.deviceId] = cmd[d] < -5
+        return forced, base, base
