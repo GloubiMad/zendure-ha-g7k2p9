@@ -1,0 +1,56 @@
+# === Carte FLUX du moteur fondation (Plotly) ===
+# Carte HACS dbuezas : type = custom:plotly-graph (PAS "-card"). A coller en carte MANUELLE.
+# Piege YAML : la cle "y" doit etre quotee, sinon YAML 1.1 la lit comme le booleen true.
+#
+# CE QU'IL FAUT Y VOIR :
+#  - "P1 reseau" doit rester colle a zero. Positif = on achete, negatif = on exporte.
+#  - "glagla encaisse" doit rester proche de ZERO tant que up a de la place et que le
+#    surplus depasse le seuil de routage (300 W). Si cette courbe plonge, c'est que
+#    glagla se remplit elle-meme au lieu d'envoyer son surplus vers up.
+#  - "up charge" doit monter quand glagla a du surplus solaire.
+#  - "glagla sortie" doit suivre son solaire (moins l'overhead ~50 W).
+type: custom:plotly-graph
+title: Fondation — flux d'énergie
+hours_to_show: 3
+refresh_interval: 10
+layout:
+  height: 400
+  margin: { l: 55, r: 15, t: 40, b: 30 }
+  legend: { orientation: h, y: -0.18 }
+  yaxis:
+    title: W
+    zeroline: true
+    zerolinewidth: 2
+    zerolinecolor: "#888"
+entities:
+  - entity: sensor.shellypro3em_9454c5b8aaf0_phase_c_active_power
+    name: P1 réseau (+ achat / − export)
+    line: { width: 3, color: "#e74c3c" }
+
+  - entity: sensor.zendure_manager_fondation_house_load
+    name: Demande maison (house load)
+    line: { width: 2, color: "#34495e", dash: dot }
+
+  - entity: sensor.hyper_2000_glagla_solar_input_power
+    name: glagla — solaire produit
+    line: { width: 2, color: "#f1c40f" }
+
+  - entity: sensor.hyper_2000_glagla_output_home_power
+    name: glagla — sortie vers la maison
+    line: { width: 2, color: "#e67e22" }
+
+  - entity: sensor.hyper_2000_glagla_pack_input_power
+    name: glagla — encaisse (doit rester ~0)
+    filters:
+      - multiply: -1
+    line: { width: 2, color: "#c0392b", dash: dash }
+
+  - entity: sensor.hyper_2000_up_grid_input_power
+    name: up — charge
+    filters:
+      - multiply: -1
+    line: { width: 3, color: "#27ae60" }
+
+  - entity: sensor.hyper_2000_up_output_home_power
+    name: up — décharge
+    line: { width: 2, color: "#2980b9" }

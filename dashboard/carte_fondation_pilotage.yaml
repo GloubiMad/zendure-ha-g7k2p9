@@ -1,0 +1,87 @@
+# === Carte PILOTAGE du moteur fondation ===
+# A coller en carte MANUELLE dans HA (le fichier commence directement par "type:").
+# Regroupe : le mode, les capteurs d'observation, les 11 reglages a chaud, les 2 strategies
+# et le controle du log simulation. Voir PARAMETRES_FONDATION.md pour ce que chaque reglage fait.
+type: entities
+title: Zendure — Moteur fondation
+show_header_toggle: false
+state_color: true
+entities:
+  - type: section
+    label: Mode & observation
+
+  - entity: select.zendure_manager_operation
+    name: Mode de fonctionnement
+    secondary_info: last-changed
+  - entity: sensor.zendure_manager_fondation_state
+    name: Régime (repos / charge / décharge)
+  - entity: sensor.zendure_manager_fondation_house_load
+    name: Demande maison (house load)
+  - entity: sensor.zendure_manager_fondation_setpoint
+    name: Consigne totale (setpoint)
+  - entity: sensor.zendure_manager_fondation_integral
+    name: Intégrateur (doit rester ~0)
+  - entity: sensor.zendure_manager_fondation_forced
+    name: Déversement forcé (onduleur plein)
+
+  - type: section
+    label: État des batteries
+
+  - entity: sensor.hyper_2000_glagla_electric_level
+    name: glagla — SoC
+  - entity: sensor.hyper_2000_up_electric_level
+    name: up — SoC
+  - entity: sensor.hyper_2000_glagla_pack_input_power
+    name: glagla — encaisse (doit rester ~0)
+  - entity: sensor.hyper_2000_up_grid_input_power
+    name: up — charge en cours
+
+  - type: section
+    label: Quand agir (le régime)
+
+  - entity: number.zendure_manager_fondation_db_on
+    name: Seuil d'engagement — défaut 80 W
+  - entity: number.zendure_manager_fondation_db_off
+    name: Seuil de coupure — défaut 30 W (garder < engagement)
+  - entity: number.zendure_manager_fondation_fast_track
+    name: Seuil fast-track — défaut 200 W (garder > engagement)
+
+  - type: section
+    label: Stabilité (calmer le bruit)
+
+  - entity: number.zendure_manager_fondation_hl_alpha
+    name: Lissage house load — défaut 40 % (baisser = plus lisse)
+  - entity: number.zendure_manager_fondation_pv_alpha
+    name: Lissage solaire — défaut 20 %
+  - entity: number.zendure_manager_fondation_dwell_invert
+    name: Dwell d'inversion — défaut 3 cycles (~15 s)
+
+  - type: section
+    label: Surplus solaire (routage vers up)
+
+  - entity: number.zendure_manager_fondation_surplus_on
+    name: Routage — engagement — défaut 300 W
+  - entity: number.zendure_manager_fondation_surplus_off
+    name: Routage — coupure — défaut 150 W
+
+  - type: section
+    label: Précision & répartition
+
+  - entity: number.zendure_manager_fondation_step
+    name: Pas de l'intégrateur — défaut 120 W
+  - entity: number.zendure_manager_fondation_overhead
+    name: Overhead onduleur — défaut 50 W
+  - entity: number.zendure_manager_fondation_hyst_device
+    name: Hystérésis device — défaut 5 %
+  - entity: select.zendure_manager_fondation_discharge_strategy
+    name: Stratégie décharge
+  - entity: select.zendure_manager_fondation_charge_strategy
+    name: Stratégie charge
+
+  - type: section
+    label: Journal de simulation
+
+  - entity: switch.zendure_manager_simulation_log
+    name: Log simulation (à chaud)
+  - entity: button.zendure_manager_simulation_rotate
+    name: Faire tourner le fichier
