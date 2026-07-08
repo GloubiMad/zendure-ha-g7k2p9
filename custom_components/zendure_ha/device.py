@@ -153,6 +153,9 @@ class ZendureDevice(EntityDevice):
         self.socStatus = ZendureSensor(self, "socStatus", state=0)
         self.socLimit = ZendureSensor(self, "socLimit", state=0)
         self.byPass = ZendureSensor(self, "pass", state=0)
+        # Consigne envoyée par le manager (signée : + décharge / − charge), AVANT clamp.
+        # À comparer au réalisé (outputHomePower) : c'est LE capteur de diagnostic du moteur.
+        self.cmdTarget = ZendureSensor(self, "cmdTarget", None, "W", "power", "measurement", state=0)
 
         fuseGroups = {0: "unused", 1: "owncircuit", 2: "group800", 3: "group800_2400", 4: "group1200", 5: "group2000", 6: "group2400", 7: "group3600"}
         self.fuseGroup = ZendureRestoreSelect(self, "fuseGroup", fuseGroups, None)
@@ -643,6 +646,7 @@ class ZendureDevice(EntityDevice):
     async def power_charge(self, power: int) -> int:
         """Set charge power."""
         self.cmd_target = power  # consigne AVANT clamp (observabilité)
+        self.cmdTarget.update_value(power)
         power = min(0, max(power, self.charge_limit))
         """power is here a negative value, but homeInput and homeOutput are always positive"""
         if abs(power + self.homeInput.asInt - self.homeOutput.asInt) <= SmartMode.POWER_TOLERANCE:
@@ -657,6 +661,7 @@ class ZendureDevice(EntityDevice):
     async def power_discharge(self, power: int) -> int:
         """Set discharge power."""
         self.cmd_target = power  # consigne AVANT clamp (observabilité)
+        self.cmdTarget.update_value(power)
         power = max(0, min(power, self.discharge_limit))
         if abs(power - self.homeOutput.asInt + self.homeInput.asInt) <= SmartMode.POWER_TOLERANCE:
             _LOGGER.info("Power discharge %s => no action [power %s]", self.name, power)

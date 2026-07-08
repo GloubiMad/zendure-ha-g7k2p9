@@ -388,6 +388,9 @@
       },
       "delta_voltage": {
         "name": "Delta tension"
+      },
+      "cmd_target": {
+        "name": "Consigne moteur (cmd_target)"
       }
     },
     "select": {

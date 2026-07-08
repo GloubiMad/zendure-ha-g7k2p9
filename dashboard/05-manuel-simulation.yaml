@@ -1,0 +1,15 @@
+# === 05 - Manuel & journal de simulation ===
+# A coller en carte MANUELLE. (remplace l'ancienne 05-manuel-options.yaml)
+# MAJ 1.4.2 : le switch "mqtt_influx" etait une entite du fork 1.3.1.x -> remplace ici par
+# le controle du log simulation (switch a chaud + bouton de rotation du fichier).
+type: entities
+title: Manuel & simulation
+entities:
+  # n'agit qu'en mode « manual » : puissance fixe (+ décharge / − charge)
+  - entity: number.zendure_manager_manual_power
+    name: Puissance manuelle
+  - type: divider
+  - entity: switch.zendure_manager_simulation_log
+    name: Log simulation (à chaud)
+  - entity: button.zendure_manager_simulation_rotate
+    name: Faire tourner le fichier

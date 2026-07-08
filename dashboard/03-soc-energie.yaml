@@ -1,0 +1,17 @@
+# === 03 - SoC & énergie ===
+# A coller en carte MANUELLE.
+# MAJ 1.4.2 : "usable_energy" etait une entite du fork 1.3.1.x, retiree.
+type: entities
+title: SoC & énergie
+entities:
+  - entity: sensor.zendure_manager_global_soc
+    name: SoC parc (%)
+  - entity: sensor.zendure_manager_available_kwh
+    name: Énergie dispo (kWh)
+  - entity: sensor.zendure_manager_total_kwh
+    name: Énergie totale (kWh)
+  - type: divider
+  - entity: sensor.hyper_2000_glagla_electric_level
+    name: SoC glagla
+  - entity: sensor.hyper_2000_up_electric_level
+    name: SoC up

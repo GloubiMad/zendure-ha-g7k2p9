@@ -1,0 +1,22 @@
+# === 06 - Hyper glagla (celle avec les PV) ===
+# A coller en carte MANUELLE. Inchangee depuis le 30/06 : les entites etaient deja bonnes.
+# ATTENTION au nommage Zendure, contre-intuitif (verifie dans device.py) :
+#   outputPackPower -> batteryInput  = la batterie SE CHARGE
+#   packInputPower  -> batteryOutput = la batterie SE DECHARGE
+# LECTURE : "Charge batterie" doit rester proche de ZERO tant que up a de la place et que
+# le surplus depasse le seuil de routage (300 W). Si elle plonge, glagla encaisse son
+# surplus au lieu de l'envoyer vers up -> baisser "seuil routage surplus (engagement)".
+type: history-graph
+title: Hyper glagla (PV)
+hours_to_show: 2
+entities:
+  - entity: sensor.hyper_2000_glagla_solar_input_power
+    name: Solaire
+  - entity: sensor.hyper_2000_glagla_output_home_power
+    name: Sortie maison
+  - entity: sensor.hyper_2000_glagla_output_pack_power
+    name: Charge batterie (doit rester ~0)
+  - entity: sensor.hyper_2000_glagla_pack_input_power
+    name: Décharge batterie
+  - entity: sensor.hyper_2000_glagla_cmd_target
+    name: Consigne moteur

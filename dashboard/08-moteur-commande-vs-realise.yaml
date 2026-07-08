@@ -1,0 +1,26 @@
+# === 08 - Moteur : commandé vs réalisé (par batterie) ===
+# A coller en carte MANUELLE.
+# MAJ 1.4.2 : le capteur "cmd_target" avait disparu (il n'etait plus qu'un attribut interne)
+# -> recree en 1.4.2.16. C'est LE graphe de diagnostic du moteur.
+#
+# LECTURE - l'ecart entre "Commande" et "Realise" raconte tout :
+#  - ils se suivent  : le Hyper obeit, tout va bien.
+#  - Realise > Commande sur glagla : elle DEVERSE son solaire (elle est pleine, ou en
+#    gridReverse « autorise »). Verifier qu'elle est bien en « desactive » ou « interdit ».
+#  - Realise fige alors que Commande bouge : le Hyper ne repond plus (decrochage MQTT).
+#    Le watchdog le relance sous ~60 s ; regarder les logs HA (« muet depuis Xs »).
+#  - Commande qui oscille + / − a chaque cycle : le moteur chasse un transitoire court
+#    (micro-ondes, resistance) -> monter le "dwell d'inversion".
+type: history-graph
+title: Moteur — commandé vs réalisé (par batterie)
+hours_to_show: 2
+entities:
+  # cmd_target = ce que le manager ORDONNE (signé : + décharge / − charge), AVANT clamp
+  - entity: sensor.hyper_2000_glagla_cmd_target
+    name: Commandé glagla
+  - entity: sensor.hyper_2000_glagla_output_home_power
+    name: Réalisé glagla (sortie maison)
+  - entity: sensor.hyper_2000_up_cmd_target
+    name: Commandé up
+  - entity: sensor.hyper_2000_up_output_home_power
+    name: Réalisé up (sortie maison)

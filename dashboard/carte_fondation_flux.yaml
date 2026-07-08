@@ -39,7 +39,7 @@ entities:
     name: glagla — sortie vers la maison
     line: { width: 2, color: "#e67e22" }
 
-  - entity: sensor.hyper_2000_glagla_pack_input_power
+  - entity: sensor.hyper_2000_glagla_output_pack_power
     name: glagla — encaisse (doit rester ~0)
     filters:
       - multiply: -1

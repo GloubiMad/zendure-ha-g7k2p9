@@ -427,6 +427,9 @@
       },
       "delta_voltage": {
         "name": "Delta Voltage"
+      },
+      "cmd_target": {
+        "name": "Engine command (cmd_target)"
       }
     },
     "select": {

@@ -1,0 +1,12 @@
+# === 02 - SoC du parc (jauge) ===
+# A coller en carte MANUELLE.
+# MAJ 1.4.2 : "weighted_soc" etait une entite du fork 1.3.1.x -> remplacee par "global_soc".
+type: gauge
+name: SoC parc
+entity: sensor.zendure_manager_global_soc
+min: 0
+max: 100
+severity:
+  green: 50
+  yellow: 20
+  red: 0
