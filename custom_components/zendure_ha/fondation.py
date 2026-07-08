@@ -215,6 +215,57 @@ class FondationEngine:
                 take = min(demand, ns)
                 cmd[d] = take
                 demand -= take
+
+            # 1bis) SURPLUS SOLAIRE -> le stocker dans les batteries SANS PV (« sans-PV d'abord »).
+            # Sinon le firmware du producteur encaisse l'excédent dans SA propre batterie (observé :
+            # glagla solaire 744, maison 506, elle sort 506 et met 238 dans sa batterie ; up, vide,
+            # ne reçoit rien et la stratégie de charge n'est jamais appelée car house_load reste > 0 :
+            # le surplus n'atteint jamais le bus). On commande donc le producteur à sortir son solaire
+            # utilisable en plus (base + charge), et la batterie sans PV à l'absorber. Ce que up ne peut
+            # pas prendre reste encaissé par le producteur (repli naturel, aucune consigne).
+            if demand <= 0:
+                unused = {d: max(0.0, self.pv_ema[d.deviceId] - ovh - cmd[d]) for d in devices if d.state != DeviceState.SOCFULL}
+                total_unused = sum(unused.values())
+                if total_unused > 0:
+                    # sinks = batteries SANS solaire (donc pas les producteurs) qui ont de la place
+                    sinks = [
+                        d
+                        for d in devices
+                        if (self.pv_ema[d.deviceId] - ovh) <= 0 and d.state != DeviceState.SOCFULL and d.byPass.asInt == 0 and d.electricLevel.asInt < 100
+                    ]
+                    if self.charge_strategy.value == 2:  # fixed_order : le plus gros d'abord
+                        sinks.sort(key=lambda d: -d.kWh)
+                    else:  # plus vide d'abord
+                        sinks.sort(key=lambda d: d.electricLevel.asInt)
+                    fuse_chg: dict[object, float] = {}
+
+                    def chg_room(d: ZendureDevice) -> float:
+                        used = fuse_chg.get(d.fuseGrp, 0.0)
+                        return max(0.0, min(-d.charge_limit, -d.fuseGrp.minpower - used))
+
+                    # Capacité de sortie SUPPLÉMENTAIRE des producteurs (limite device ET fusegroup).
+                    # Sans ce plafond, on commanderait la charge au-delà de ce que le producteur peut
+                    # sortir -> la batterie tirerait la différence du RÉSEAU (import). Cf. cas
+                    # maison 200 / solaire 1500 : glagla plafonne à 1200, up ne doit charger que 1000.
+                    prod_extra = {
+                        d: max(0.0, min(spare, min(float(d.discharge_limit), float(d.fuseGrp.maxpower)) - cmd[d]))
+                        for d, spare in unused.items()
+                        if spare > 0
+                    }
+                    total_charge = min(total_unused, sum(prod_extra.values()), sum(chg_room(d) for d in sinks))
+                    if total_charge > 0:
+                        rem = total_charge
+                        for d in sinks:  # les batteries sans PV absorbent
+                            take = min(rem, chg_room(d))
+                            cmd[d] -= take
+                            rem -= take
+                            fuse_chg[d.fuseGrp] = fuse_chg.get(d.fuseGrp, 0.0) + take
+                        rem = total_charge
+                        for d, extra_cap in prod_extra.items():  # les producteurs sortent ce surplus en plus
+                            extra = min(rem, extra_cap)
+                            cmd[d] += extra
+                            rem -= extra
+
             # 2) le reste sur les batteries selon la STRATÉGIE décharge.
             #    SOCEMPTY exclu (il passe déjà son PV à l'étape 1) avec hystérésis de PLANCHER :
             #    un device qui a touché minSoc reste exclu jusqu'à minSoc+3 (sinon fixed_order oscille
