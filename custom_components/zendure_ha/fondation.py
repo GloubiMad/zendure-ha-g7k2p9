@@ -353,8 +353,12 @@ class FondationEngine:
             fuse_used = {}
 
             def chg_cap(d: ZendureDevice) -> float:
+                # place de charge ENCORE disponible : min(marge device, marge fusegroup).
+                # BUG corrigé (même famille que dis_cap) : `used` inclut déjà -cmd[d] ; l'ancienne
+                # formule `min(limit, minpower-used) + cmd[d]` resoustrayait -> place sous-estimée
+                # dès la 2e passe (parallel) et pour tout usage après la distribution du bus.
                 used = fuse_used.get(d.fuseGrp, 0.0)
-                return max(0.0, min(-d.charge_limit, -d.fuseGrp.minpower - used) + cmd[d])
+                return max(0.0, min(-d.charge_limit + cmd[d], -d.fuseGrp.minpower - used))
 
             cstrat = self.charge_strategy.value
             if cstrat == 3:  # parallel : prorata place (100−SoC)×capacité, reliquat en 2e passe
@@ -382,6 +386,38 @@ class FondationEngine:
                     cmd[d] -= take
                     rem -= take
                     fuse_used[d.fuseGrp] = fuse_used.get(d.fuseGrp, 0.0) + take
+
+            # 1bis (CHARGE) : le surplus du bus (export des micro-onduleurs tiers) est absorbé ci-dessus.
+            # S'il RESTE de la place dans les batteries sans PV, y router aussi le solaire des producteurs
+            # au lieu de les laisser l'encaisser (même seuil/hystérésis qu'en décharge). Si le bus a déjà
+            # saturé les batteries (rem > 0), il ne reste pas de place -> pas de routage, repli naturel.
+            sinks = [d for d in cand if (self.pv_ema[d.deviceId] - ovh) <= 0 and d.electricLevel.asInt < 100]
+            room_left = sum(chg_cap(d) for d in sinks)
+            if room_left <= 0:
+                self.surplus_active = False
+            else:
+                prod_extra: dict[ZendureDevice, float] = {}
+                for d in devices:
+                    if d.state == DeviceState.SOCFULL or cmd[d] < 0:
+                        continue  # plein, ou déjà en charge depuis le bus : on ne lui demande pas de sortir
+                    spare = max(0.0, self.pv_ema[d.deviceId] - ovh - cmd[d])
+                    if spare > 0:
+                        prod_extra[d] = min(spare, min(float(d.discharge_limit), float(d.fuseGrp.maxpower)) - cmd[d])
+                routable = min(sum(prod_extra.values()), room_left)
+                seuil = self.surplus_off.asNumber if self.surplus_active else self.surplus_on.asNumber
+                self.surplus_active = routable >= seuil
+                if self.surplus_active and routable > 0:
+                    r = routable
+                    for d in sinks:  # les batteries sans PV absorbent en plus
+                        take = min(r, chg_cap(d))
+                        cmd[d] -= take
+                        r -= take
+                        fuse_used[d.fuseGrp] = fuse_used.get(d.fuseGrp, 0.0) + take
+                    r = routable
+                    for d, cap in prod_extra.items():  # les producteurs sortent leur solaire
+                        extra = min(r, cap)
+                        cmd[d] += extra
+                        r -= extra
             for d in devices:
                 self.lead[d.deviceId] = False
                 self.clead[d.deviceId] = cmd[d] < -5
