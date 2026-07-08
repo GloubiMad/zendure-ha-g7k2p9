@@ -129,6 +129,12 @@
       },
       "fondation_overhead": {
         "name": "Fondation : overhead onduleur"
+      },
+      "fondation_surplus_on": {
+        "name": "Fondation : seuil routage surplus (engagement)"
+      },
+      "fondation_surplus_off": {
+        "name": "Fondation : seuil routage surplus (coupure)"
       }
     },
     "sensor": {

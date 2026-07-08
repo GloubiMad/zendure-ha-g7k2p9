@@ -139,6 +139,12 @@
       },
       "fondation_overhead": {
         "name": "Fondation: inverter overhead"
+      },
+      "fondation_surplus_on": {
+        "name": "Fondation: surplus routing threshold (engage)"
+      },
+      "fondation_surplus_off": {
+        "name": "Fondation: surplus routing threshold (release)"
       }
     },
     "sensor": {

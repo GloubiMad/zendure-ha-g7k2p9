@@ -58,6 +58,7 @@ class FondationEngine:
         self.lead: dict[str, bool] = {}        # hystérésis sticky par device (décharge batterie)
         self.clead: dict[str, bool] = {}       # hystérésis sticky par device (charge)
         self.floor: dict[str, bool] = {}       # hystérésis de plancher SoC (sticky jusqu'à minSoc+3)
+        self.surplus_active = False            # hystérésis du routage de surplus solaire (anti flip-flap)
         self.debug = ""                        # queue de ligne pour simulation.csv
         # Comportement producteur plein : False=STORE (stocke le surplus dans les batteries, écrête
         # le reste) ; True=BLOCK (rien ne sort, maison sur réseau). Le mapping vers un mode gridReverse
@@ -75,6 +76,11 @@ class FondationEngine:
         self.step = FondationNumber(m, "fondation_step", 120, 20, 300, "W")
         self.hyst_device = FondationNumber(m, "fondation_hyst_device", 5, 1, 20, "%")
         self.overhead = FondationNumber(m, "fondation_overhead", 50, 0, 150, "W")
+        # Routage du surplus solaire d'un producteur vers une batterie sans PV : ça coûte 2 conversions
+        # (producteur DC->AC, bus, batterie AC->DC). Sous le seuil d'engagement, on laisse le producteur
+        # encaisser lui-même (1 conversion, plus efficace). Hystérésis on/off pour ne pas faire flip-flap.
+        self.surplus_on = FondationNumber(m, "fondation_surplus_on", 300, 50, 1500, "W")
+        self.surplus_off = FondationNumber(m, "fondation_surplus_off", 150, 20, 1200, "W")
         # Stratégies de répartition (n'agissent qu'en mode smart_fondation ; le « combien » reste commun).
         # Validées au banc sur 25 traces réelles : hysteresis/wide saines ; fixed_order OK avec l'hystérésis
         # de plancher ; parallel = 0 permutation mais + de grid-charge transitoire sous bruit (expérimental).
@@ -223,10 +229,14 @@ class FondationEngine:
             # le surplus n'atteint jamais le bus). On commande donc le producteur à sortir son solaire
             # utilisable en plus (base + charge), et la batterie sans PV à l'absorber. Ce que up ne peut
             # pas prendre reste encaissé par le producteur (repli naturel, aucune consigne).
-            if demand <= 0:
+            if demand > 0:
+                self.surplus_active = False  # pas de surplus : on relâche l'hystérésis
+            else:
                 unused = {d: max(0.0, self.pv_ema[d.deviceId] - ovh - cmd[d]) for d in devices if d.state != DeviceState.SOCFULL}
                 total_unused = sum(unused.values())
-                if total_unused > 0:
+                if total_unused <= 0:
+                    self.surplus_active = False
+                else:
                     # sinks = batteries SANS solaire (donc pas les producteurs) qui ont de la place
                     sinks = [
                         d
@@ -252,7 +262,13 @@ class FondationEngine:
                         for d, spare in unused.items()
                         if spare > 0
                     }
-                    total_charge = min(total_unused, sum(prod_extra.values()), sum(chg_room(d) for d in sinks))
+                    # Montant réellement routable, puis HYSTÉRÉSIS d'engagement : on ne paie les
+                    # 2 conversions que si le surplus en vaut la peine (>= surplus_on) ; une fois
+                    # engagé on continue jusqu'à surplus_off, pour ne pas faire démarrer/arrêter up.
+                    routable = min(total_unused, sum(prod_extra.values()), sum(chg_room(d) for d in sinks))
+                    seuil = self.surplus_off.asNumber if self.surplus_active else self.surplus_on.asNumber
+                    self.surplus_active = routable >= seuil
+                    total_charge = routable if self.surplus_active else 0.0
                     if total_charge > 0:
                         rem = total_charge
                         for d in sinks:  # les batteries sans PV absorbent
