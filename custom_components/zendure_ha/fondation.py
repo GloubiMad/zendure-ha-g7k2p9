@@ -59,6 +59,8 @@ class FondationEngine:
         self.clead: dict[str, bool] = {}       # hystérésis sticky par device (charge)
         self.floor: dict[str, bool] = {}       # hystérésis de plancher SoC (sticky jusqu'à minSoc+3)
         self.surplus_active = False            # hystérésis du routage de surplus solaire (anti flip-flap)
+        self.dir_prev: dict[str, float] = {}   # dernière consigne appliquée (dwell d'inversion)
+        self.dir_pend: dict[str, int] = {}     # cycles consécutifs de signe opposé demandé
         self.debug = ""                        # queue de ligne pour simulation.csv
         # Comportement producteur plein : False=STORE (stocke le surplus dans les batteries, écrête
         # le reste) ; True=BLOCK (rien ne sort, maison sur réseau). Le mapping vers un mode gridReverse
@@ -81,6 +83,11 @@ class FondationEngine:
         # encaisser lui-même (1 conversion, plus efficace). Hystérésis on/off pour ne pas faire flip-flap.
         self.surplus_on = FondationNumber(m, "fondation_surplus_on", 300, 50, 1500, "W")
         self.surplus_off = FondationNumber(m, "fondation_surplus_off", 150, 20, 1200, "W")
+        # Dwell d'INVERSION (nb de cycles) : une batterie ne passe pas charge<->décharge sur un
+        # transitoire court (micro-ondes, résistance) — elle garde sa consigne tant que le signe
+        # opposé n'a pas persisté. Évite de fabriquer un export en réagissant un cycle trop tard.
+        # 0 = désactivé. Réglable à chaud (ex. automation : lave-linge ON -> monter le dwell).
+        self.dwell_invert = FondationNumber(m, "fondation_dwell_invert", 3, 0, 10, None)
         # Stratégies de répartition (n'agissent qu'en mode smart_fondation ; le « combien » reste commun).
         # Validées au banc sur 25 traces réelles : hysteresis/wide saines ; fixed_order OK avec l'hystérésis
         # de plancher ; parallel = 0 permutation mais + de grid-charge transitoire sous bruit (expérimental).
@@ -429,6 +436,26 @@ class FondationEngine:
         await self._apply_and_report(devices, cmd, hl_raw, forced, t_raw, t_reg, p1)
 
     async def _apply_and_report(self, devices, cmd, hl_raw, forced, t_raw, t_reg, p1) -> None:
+        # --- DWELL D'INVERSION : pas de charge<->décharge sur un transitoire court ---
+        # Une charge qui pulse ~5 s (micro-ondes en décongélation, résistance) est plus rapide que le
+        # cycle du moteur : la correction arrive quand l'impulsion est finie -> on FABRIQUE un export
+        # (mesuré terrain : 59 % de l'export exporté l'était pendant que up déchargeait, 28 inversions
+        # en 10 min). On garde donc la consigne courante tant que le signe opposé n'a pas persisté.
+        dwell = int(self.dwell_invert.asNumber)
+        if dwell > 0:
+            for d in devices:
+                prev = self.dir_prev.get(d.deviceId, 0.0)
+                if prev * cmd[d] < 0:  # inversion demandée
+                    pend = self.dir_pend.get(d.deviceId, 0) + 1
+                    if pend < dwell:
+                        cmd[d] = prev  # on tient la consigne courante
+                        self.dir_pend[d.deviceId] = pend
+                    else:
+                        self.dir_pend[d.deviceId] = 0
+                else:
+                    self.dir_pend[d.deviceId] = 0
+                self.dir_prev[d.deviceId] = cmd[d]
+
         # --- application (gardes reprises du moteur 1.4.2 : bypass non stoppé, offgrid maintenu) ---
         setpoint = 0
         for d in devices:

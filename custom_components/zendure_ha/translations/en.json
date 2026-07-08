@@ -145,6 +145,9 @@
       },
       "fondation_surplus_off": {
         "name": "Fondation: surplus routing threshold (release)"
+      },
+      "fondation_dwell_invert": {
+        "name": "Fondation: reversal dwell (cycles)"
       }
     },
     "sensor": {

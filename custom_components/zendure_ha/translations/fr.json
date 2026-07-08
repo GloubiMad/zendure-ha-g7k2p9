@@ -135,6 +135,9 @@
       },
       "fondation_surplus_off": {
         "name": "Fondation : seuil routage surplus (coupure)"
+      },
+      "fondation_dwell_invert": {
+        "name": "Fondation : dwell d’inversion (cycles)"
       }
     },
     "sensor": {
