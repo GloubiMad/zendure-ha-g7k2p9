@@ -209,7 +209,12 @@ class FondationEngine:
 
         # --- consignes (sur la demande CONTRÔLABLE t_raw, pas house_load) ---
         cmd: dict[ZendureDevice, float] = dict.fromkeys(devices, 0.0)
-        if self.regime == ManagerState.DISCHARGE:
+        # IDLE passe aussi par ici : house_load ≈ 0 ne signifie PAS « pas de surplus solaire », mais
+        # « bus équilibré » — typiquement parce que les APsystems couvrent la maison ET que le producteur
+        # encaisse tout son solaire en interne. Sans ça, en IDLE on commandait 0 -> glagla encaissait
+        # 975 W et up ne recevait rien (et le régime flappait sur le bruit P1). En IDLE l'intégrale est
+        # nulle et demand ≈ 0 : l'étape 1) ne prend rien, seule l'étape 1bis route le surplus.
+        if self.regime in (ManagerState.DISCHARGE, ManagerState.IDLE):
             demand = max(0.0, t_raw) + self.integral
             # 1) le PV des producteurs NON pleins d'abord (gratuit, ne vide pas les batteries).
             #    Les SOCFULL sont exclus : leur PV est déjà déversé de force (compté dans forced),
