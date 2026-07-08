@@ -1,0 +1,30 @@
+# === 14 - Réglages : précision, stratégies & simulation ===
+# A coller en carte MANUELLE. Voir PARAMETRES_FONDATION.md.
+#
+# PRECISION — a ne quasiment jamais toucher :
+#  - « pas de l'intégrateur » : de combien on corrige l'ecart residuel a chaque cycle.
+#    Depuis l'anti-windup (1.4.2.9), l'integrateur ne s'emballe plus : inutile de le monter.
+#  - « overhead onduleur » : ce qu'un Hyper consomme juste pour tourner (~50 W).
+#    Seul cas ou le changer : ajout d'un SolarFlow 2400/4000 (autre consommation propre).
+#
+# STRATEGIES — « Ordre fixe » en charge = la batterie SANS panneaux (up) d'abord :
+# c'est ce qui preserve la place de glagla pour le solaire de midi.
+# ⚠️ « Parallèle » est EXPERIMENTAL : zero permutation, mais DEUX fois l'overhead (100 W).
+type: entities
+title: Réglages — précision & stratégies
+show_header_toggle: false
+entities:
+  - entity: number.zendure_manager_fondation_step
+    name: Pas de l'intégrateur (défaut 120 W)
+  - entity: number.zendure_manager_fondation_overhead
+    name: Overhead onduleur (défaut 50 W)
+  - type: divider
+  - entity: select.zendure_manager_fondation_discharge_strategy
+    name: Stratégie décharge
+  - entity: select.zendure_manager_fondation_charge_strategy
+    name: Stratégie charge (« Ordre fixe » = sans-PV d'abord)
+  - type: divider
+  - entity: switch.zendure_manager_simulation_log
+    name: Log simulation (à chaud)
+  - entity: button.zendure_manager_simulation_rotate
+    name: Faire tourner le fichier

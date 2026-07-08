@@ -1,0 +1,18 @@
+# === 09 - Fondation : régime ===
+# A coller en carte MANUELLE (carte HA native, pas de custom -> l'editeur visuel fonctionne).
+#
+# Le regime etait auparavant trace dans la carte diagnostic : il ecrasait l'echelle des watts.
+# Ici, HA l'affiche en BANDES DE COULEUR : bien plus lisible pour reperer un flapping.
+#
+# LECTURE : si les bandes changent sans arret (repos <-> decharge), c'est un probleme de
+# STABILITE -> baisser « lissage house load » (40 -> 25 %) ou « seuil de coupure » (30 -> 20 W).
+type: history-graph
+title: Fondation — régime
+hours_to_show: 24
+entities:
+  - entity: sensor.zendure_manager_fondation_state
+    name: Régime (repos / charge / décharge)
+  - entity: sensor.hyper_2000_glagla_pack_state
+    name: glagla
+  - entity: sensor.hyper_2000_up_pack_state
+    name: up

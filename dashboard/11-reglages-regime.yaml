@@ -1,0 +1,20 @@
+# === 11 - Réglages : quand agir (le régime) ===
+# A coller en carte MANUELLE. Voir PARAMETRES_FONDATION.md pour le detail.
+#
+# ⚠️ DEUX CONTRAINTES DURES :
+#   - « coupure » doit rester NETTEMENT sous « engagement » (l'ecart est la marge anti-battement)
+#   - « fast-track » doit rester AU-DESSUS de « engagement » (sinon le lissage ne sert plus a rien)
+type: entities
+title: Réglages — quand agir
+show_header_toggle: false
+entities:
+  - entity: number.zendure_manager_fondation_db_on
+    name: Seuil d'engagement (défaut 80 W)
+  - entity: number.zendure_manager_fondation_db_off
+    name: Seuil de coupure (défaut 30 W — garder < engagement)
+  - entity: number.zendure_manager_fondation_fast_track
+    name: Seuil fast-track (défaut 200 W — garder > engagement)
+footer:
+  type: graph
+  entity: sensor.zendure_manager_fondation_house_load
+  hours_to_show: 6

@@ -1,0 +1,29 @@
+# === 13 - Réglages : surplus solaire (routage vers up) ===
+# A coller en carte MANUELLE. Voir PARAMETRES_FONDATION.md.
+#
+# LE PRINCIPE : envoyer le surplus de glagla vers up coute DEUX conversions (~10 % de pertes).
+# Sous le seuil d'engagement, on laisse glagla l'encaisser elle-meme (une seule conversion).
+# Au-dessus, on route -> ca garde la place de glagla pour le gros soleil de midi.
+#
+# QUAND Y TOUCHER (le graphe du bas est ton indicateur : il doit rester ~0) :
+#  - glagla PLEINE des 14 h et ecretage l'apres-midi -> baisser « engagement » (300 -> 200 W)
+#  - up charge par petites bouffees inutiles         -> monter  « engagement » (300 -> 450 W)
+#  - le routage demarre/s'arrete sans arret          -> baisser « coupure »   (150 -> 100 W)
+# ⚠️ Garder un ecart franc entre les deux seuils : c'est la marge anti-battement.
+type: entities
+title: Réglages — surplus solaire
+show_header_toggle: false
+entities:
+  - entity: number.zendure_manager_fondation_surplus_on
+    name: Routage — engagement (défaut 300 W)
+  - entity: number.zendure_manager_fondation_surplus_off
+    name: Routage — coupure (défaut 150 W)
+  - type: divider
+  - entity: sensor.hyper_2000_glagla_output_pack_power
+    name: glagla encaisse (doit rester ~0)
+  - entity: sensor.hyper_2000_up_grid_input_power
+    name: up charge
+footer:
+  type: graph
+  entity: sensor.hyper_2000_glagla_output_pack_power
+  hours_to_show: 12

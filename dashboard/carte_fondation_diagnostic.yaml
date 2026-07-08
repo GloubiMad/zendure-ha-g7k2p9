@@ -1,62 +1,67 @@
-# === Carte DIAGNOSTIC du moteur fondation (Plotly) ===
-# Carte HACS dbuezas : type = custom:plotly-graph (PAS "-card"). A coller en carte MANUELLE.
-# Piege YAML : la cle "y" doit etre quotee, sinon YAML 1.1 la lit comme le booleen true.
+# === Fondation — diagnostic (Plotly) ===
+# Carte HACS dbuezas : type = custom:plotly-graph (PAS "-card").
+#
+# ⚠️ POUR L'AJOUTER/L'EDITER : clique « Modifier en YAML » dans l'editeur de carte.
+#    L'editeur VISUEL de HA ne sait pas afficher une carte custom -> il liste des cles
+#    « non prises en charge ». Ce n'est PAS une erreur, la carte fonctionne.
+#
+# Le REGIME a ete sorti de cette carte (il ecrasait l'echelle) : voir 09-fondation-regime.yaml.
 #
 # CE QU'IL FAUT Y VOIR :
-#  - "Regime" (axe de droite, 0=repos 1=charge 2=decharge) : s'il saute sans arret,
-#    c'est un probleme de STABILITE -> baisser "lissage house load" (40 -> 25 %)
-#    ou baisser "seuil de coupure" (30 -> 20 W). Cf. PARAMETRES_FONDATION.md.
-#  - "Integrateur" : doit rester proche de ZERO. S'il monte a plusieurs centaines et y
-#    reste, c'est que les deux Hyper sont SATURES (conso > 2400 W) : c'est normal, et
-#    l'anti-windup l'empeche desormais de s'emballer. S'il oscille fort, baisser le
-#    "pas de l'integrateur".
-#  - "Deversement force" : non nul = glagla est PLEINE et pousse son solaire malgre tout.
-#  - "SoC up" doit monter les jours de surplus. S'il stagne alors que glagla encaisse,
-#    baisser le "seuil routage surplus (engagement)".
+#  - « Intégrateur » doit rester proche de ZERO. S'il monte a plusieurs centaines et y reste,
+#    les deux Hyper sont SATURES (conso > 2400 W) : c'est normal, l'anti-windup l'empeche de
+#    s'emballer. S'il oscille fort -> baisser le « pas de l'intégrateur ».
+#  - « Déversement forcé » non nul = glagla est PLEINE et pousse son solaire malgre tout.
+#  - « SoC up » (axe de droite) doit monter les jours de surplus. S'il stagne alors que
+#    glagla encaisse -> baisser le « seuil routage surplus (engagement) ».
 type: custom:plotly-graph
-title: Fondation — diagnostic (régime, intégrateur, SoC)
-hours_to_show: 12
-refresh_interval: 30
+title: Fondation — diagnostic
+hours_to_show: 24
+refresh_interval: 60
 layout:
-  height: 380
-  margin: { l: 55, r: 55, t: 40, b: 30 }
-  legend: { orientation: h, y: -0.18 }
+  height: 440
+  margin: { l: 62, r: 55, t: 80, b: 40 }
+  hovermode: x unified
+  legend:
+    orientation: h
+    yanchor: bottom
+    y: 1.03
+    xanchor: left
+    x: 0
+    font: { size: 11 }
   yaxis:
     title: W
     zeroline: true
     zerolinewidth: 2
-    zerolinecolor: "#888"
+    zerolinecolor: "#666"
+    gridcolor: "#eee"
   yaxis2:
-    title: Régime / SoC
+    title: SoC (%)
     overlaying: y
     side: right
-    range: [-0.2, 100]
+    range: [0, 100]
+    showgrid: false
+  xaxis:
+    gridcolor: "#eee"
 entities:
   - entity: sensor.zendure_manager_fondation_integral
     name: Intégrateur (doit rester ~0)
     line: { width: 3, color: "#8e44ad" }
 
   - entity: sensor.zendure_manager_fondation_setpoint
-    name: Consigne totale (setpoint)
-    line: { width: 2, color: "#16a085" }
+    name: Consigne totale
+    line: { width: 1.5, color: "#16a085" }
 
   - entity: sensor.zendure_manager_fondation_forced
     name: Déversement forcé (onduleur plein)
     line: { width: 2, color: "#c0392b", dash: dash }
 
-  - entity: sensor.zendure_manager_fondation_state
-    name: Régime (0 repos / 1 charge / 2 décharge)
-    "yaxis": y2
-    line: { width: 2, color: "#7f8c8d", shape: hv }
-    filters:
-      - multiply: 20
-
   - entity: sensor.hyper_2000_up_electric_level
-    name: up — SoC (%)
+    name: SoC up
     "yaxis": y2
-    line: { width: 2, color: "#27ae60", dash: dot }
+    line: { width: 2.5, color: "#27ae60", dash: dot }
 
   - entity: sensor.hyper_2000_glagla_electric_level
-    name: glagla — SoC (%)
+    name: SoC glagla
     "yaxis": y2
-    line: { width: 2, color: "#f39c12", dash: dot }
+    line: { width: 2.5, color: "#f39c12", dash: dot }
