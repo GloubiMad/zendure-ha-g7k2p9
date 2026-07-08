@@ -156,6 +156,11 @@ class ZendureDevice(EntityDevice):
         # Consigne envoyée par le manager (signée : + décharge / − charge), AVANT clamp.
         # À comparer au réalisé (outputHomePower) : c'est LE capteur de diagnostic du moteur.
         self.cmdTarget = ZendureSensor(self, "cmdTarget", None, "W", "power", "measurement", state=0)
+        # Reserve REELLEMENT exploitable, bornee par minSoc/socSet :
+        #   0 % = au plancher minSoc (plus rien a donner), 100 % = au plafond socSet.
+        # (un SoC de 15 % avec minSoc=15 % vaut 0 % utilisable, pas 15 %)
+        self.usableSoc = ZendureSensor(self, "usableSoc", None, "%", "battery", "measurement", 1)
+        self.usableKwh = ZendureSensor(self, "usableKwh", None, "kWh", "energy_storage", None, 2)
 
         fuseGroups = {0: "unused", 1: "owncircuit", 2: "group800", 3: "group800_2400", 4: "group1200", 5: "group2000", 6: "group2400", 7: "group3600"}
         self.fuseGroup = ZendureRestoreSelect(self, "fuseGroup", fuseGroups, None)
@@ -223,6 +228,22 @@ class ZendureDevice(EntityDevice):
                 self.connectionStatus.update_value(10)
         except Exception:
             self.connectionStatus.update_value(0)
+
+        self.updateUsable()
+
+    def updateUsable(self) -> None:
+        """Reserve exploitable entre minSoc et socSet (% et kWh)."""
+        try:
+            lo = float(self.minSoc.asNumber)
+            hi = float(self.socSet.asNumber)
+            soc = float(self.electricLevel.asNumber)
+            span = hi - lo
+            if span <= 0 or self.kWh <= 0:
+                return
+            self.usableSoc.update_value(round(max(0.0, min(100.0, (soc - lo) / span * 100.0)), 1))
+            self.usableKwh.update_value(round(max(0.0, (soc - lo) / 100.0 * self.kWh), 2))
+        except Exception as err:
+            _LOGGER.debug("updateUsable %s: %s", self.name, err)
 
     def entityUpdate(self, key: Any, value: Any) -> bool:
         # update entity state

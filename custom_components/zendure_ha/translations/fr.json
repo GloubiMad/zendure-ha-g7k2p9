@@ -391,6 +391,18 @@
       },
       "cmd_target": {
         "name": "Consigne moteur (cmd_target)"
+      },
+      "usable_soc": {
+        "name": "Réserve utilisable (%)"
+      },
+      "usable_kwh": {
+        "name": "Réserve utilisable (kWh)"
+      },
+      "usable_soc_parc": {
+        "name": "Parc — réserve utilisable (%)"
+      },
+      "usable_kwh_parc": {
+        "name": "Parc — réserve utilisable (kWh)"
       }
     },
     "select": {

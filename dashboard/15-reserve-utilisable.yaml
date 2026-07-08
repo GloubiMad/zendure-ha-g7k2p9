@@ -1,0 +1,37 @@
+# === 15 - Réserve utilisable (bornée par minSoc / socSet) ===
+# A coller en carte MANUELLE. Carte HA native.
+#
+# POURQUOI CES ENTITES : le SoC brut ment. glagla a un minSoc de 16 % : a 16 % de SoC,
+# elle n'a plus RIEN a donner, mais le SoC affiche 16 %. La « réserve utilisable » remet
+# les compteurs a l'echelle :  0 % = au plancher,  100 % = au plafond socSet.
+#     reserve = (SoC − minSoc) / (socSet − minSoc) × 100
+#
+# LE PARC est PONDERE PAR LA CAPACITE (on additionne des kWh, pas des pourcentages).
+# Une moyenne naive des deux pourcentages se trompe jusqu'a ~10 points :
+#   glagla pleine (100 %) + up vide (15 %)  ->  parc reel 59.7 %, moyenne naive 50 %.
+type: entities
+title: Réserve utilisable
+show_header_toggle: false
+entities:
+  - entity: sensor.zendure_manager_usable_soc_parc
+    name: Parc — réserve utilisable
+  - entity: sensor.zendure_manager_usable_kwh_parc
+    name: Parc — énergie mobilisable
+  - type: divider
+  - entity: sensor.hyper_2000_glagla_usable_soc
+    name: glagla — réserve utilisable
+  - entity: sensor.hyper_2000_glagla_usable_kwh
+    name: glagla — énergie mobilisable
+  - entity: sensor.hyper_2000_glagla_electric_level
+    name: glagla — SoC brut (pour comparaison)
+  - type: divider
+  - entity: sensor.hyper_2000_up_usable_soc
+    name: up — réserve utilisable
+  - entity: sensor.hyper_2000_up_usable_kwh
+    name: up — énergie mobilisable
+  - entity: sensor.hyper_2000_up_electric_level
+    name: up — SoC brut (pour comparaison)
+footer:
+  type: graph
+  entity: sensor.zendure_manager_usable_soc_parc
+  hours_to_show: 24

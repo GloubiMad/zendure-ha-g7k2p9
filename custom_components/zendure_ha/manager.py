@@ -127,6 +127,10 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.totalKwh = ZendureSensor(self, "total_kwh", None, "kWh", "energy_storage", "measurement", 2)
         self.power = ZendureSensor(self, "power", None, "W", "power", "measurement", 0)
         self.globalSoc = ZendureSensor(self, "global_soc", None, "%", "battery", "measurement", 1)
+        # Reserve exploitable du PARC, bornee par minSoc/socSet et PONDEREE PAR LA CAPACITE
+        # (une moyenne simple mentirait : glagla 5.76 kWh ne pese pas comme up 3.84 kWh).
+        self.usableSocParc = ZendureSensor(self, "usableSocParc", None, "%", "battery", "measurement", 1)
+        self.usableKwhParc = ZendureSensor(self, "usableKwhParc", None, "kWh", "energy_storage", None, 2)
 
         # load devices
         for dev in data["deviceList"]:
@@ -315,6 +319,20 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             device.setStatus()
         self.update_count += 1
         self.totalKwh.update_value(kwh)
+
+        # Reserve exploitable du parc : somme des kWh utilisables / somme des kWh utilisables MAX.
+        # Ponderee par la capacite de fait, puisqu'on additionne des kWh et non des pourcentages.
+        usable = 0.0
+        usable_max = 0.0
+        for d in self.devices:
+            lo = float(d.minSoc.asNumber)
+            hi = float(d.socSet.asNumber)
+            if hi - lo <= 0 or d.kWh <= 0:
+                continue
+            usable += max(0.0, (float(d.electricLevel.asNumber) - lo) / 100.0 * d.kWh)
+            usable_max += (hi - lo) / 100.0 * d.kWh
+        self.usableKwhParc.update_value(round(usable, 2))
+        self.usableSocParc.update_value(round(usable / usable_max * 100.0, 1) if usable_max > 0 else 0)
 
         # Reconnexion des devices muets (décrochage MQTT observé : glagla silencieuse 2 min,
         # sortie figée, le moteur régulait dans le vide). Actions SÛRES uniquement.

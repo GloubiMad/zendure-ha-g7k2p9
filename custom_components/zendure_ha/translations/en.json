@@ -430,6 +430,18 @@
       },
       "cmd_target": {
         "name": "Engine command (cmd_target)"
+      },
+      "usable_soc": {
+        "name": "Usable reserve (%)"
+      },
+      "usable_kwh": {
+        "name": "Usable reserve (kWh)"
+      },
+      "usable_soc_parc": {
+        "name": "Fleet — usable reserve (%)"
+      },
+      "usable_kwh_parc": {
+        "name": "Fleet — usable reserve (kWh)"
       }
     },
     "select": {
