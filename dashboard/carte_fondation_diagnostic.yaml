@@ -14,10 +14,18 @@
 #  - « Déversement forcé » non nul = glagla est PLEINE et pousse son solaire malgre tout.
 #  - « SoC up » (axe de droite) doit monter les jours de surplus. S'il stagne alors que
 #    glagla encaisse -> baisser le « seuil routage surplus (engagement) ».
+#
+# LARGEUR DE LA CARTE : elle depend du type de VUE, pas de la carte.
+#  - vue « Sections »  : le bloc grid_options ci-dessous la met en pleine largeur.
+#  - vue « Panneau (1 carte) » : pleine largeur d'office (le mieux pour un graphe d'analyse).
+#  - vue « Masonry » (classique) : Modifier la vue -> Colonnes -> 1.
+# (grid_options est ignore par les vues qui ne le gerent pas : on peut le laisser.)
 type: custom:plotly-graph
 title: Fondation — diagnostic
 hours_to_show: 24
 refresh_interval: 60
+grid_options:
+  columns: full
 layout:
   height: 440
   margin: { l: 62, r: 55, t: 80, b: 40 }
