@@ -145,7 +145,9 @@ class ZendureDevice(EntityDevice):
         # Watchdog MQTT v2 : état d'escalade par device (piloté par manager._mqtt_watchdog)
         self.wd_stale_since: datetime | None = None
         self.wd_stage: int = 0  # 0=OK, 1=getAll, 2=puissance, 3=ble, 4=plantage
-        self.wd_wake_by: str = ""  # dernier palier atteint (mesure de ce qui réveille réellement)
+        self.wd_wake_by: str = ""  # label calculé À LA REPRISE : probe efficace si réponse < WD_RESPONSE, sinon "spontané"
+        self.wd_probe_at: datetime | None = None  # instant du dernier probe (pour mesurer sa latence de réponse)
+        self.wd_probe_kind: str = ""  # type du dernier probe : getall / puissance / ble
         self.wd_ble_running: bool = False  # single-flight du toggle BLE
 
         self.create_entities()

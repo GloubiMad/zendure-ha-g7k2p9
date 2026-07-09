@@ -365,6 +365,8 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 if d.wd_stage != 0:  # jamais vu / marqué hors-ligne ailleurs -> reset état
                     d.wd_stage = 0
                     d.wd_stale_since = None
+                    d.wd_probe_at = None
+                    d.wd_probe_kind = ""
                     d.mqttStalled.update_value(0)
                 continue
 
@@ -377,14 +379,23 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             # --- cadence normale / reprise ---
             if stale <= t_getall:
                 if d.wd_stage != 0:
-                    _LOGGER.warning("Zendure %s de nouveau actif après %ds muet (dernier probe: %s)", d.name, stale, d.wd_wake_by or "spontané")
-                    d.mqttLastWake.update_value(d.wd_wake_by or "spontané")
+                    # attribution HONNÊTE : le device n'est "réveillé par" un probe QUE s'il a republié
+                    # dans les WD_RESPONSE s suivant ce probe ; sinon la reprise est spontanée (ou reset manuel).
+                    last_msg = d.lastseen - timedelta(minutes=5)
+                    if d.wd_probe_at is not None and 0 <= (last_msg - d.wd_probe_at).total_seconds() <= SmartMode.WD_RESPONSE:
+                        wake_by = d.wd_probe_kind
+                    else:
+                        wake_by = "spontané"
+                    _LOGGER.warning("Zendure %s de nouveau actif après %ds muet (réveil: %s)", d.name, stale, wake_by)
+                    d.wd_wake_by = wake_by
+                    d.mqttLastWake.update_value(wake_by)
                     d.mqttStalled.update_value(0)
                     if d.wd_stage >= 4:  # lever la notif de plantage désormais résolu
                         persistent_notification.async_dismiss(self.hass, f"zendure_stalled_{d.deviceId}")
                     d.wd_stage = 0
                     d.wd_stale_since = None
-                    d.wd_wake_by = ""
+                    d.wd_probe_at = None
+                    d.wd_probe_kind = ""
                 continue
 
             # --- silence anormal : escalade (chaque palier UNE fois) ---
@@ -394,7 +405,6 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
             if stale > t_alert and d.wd_stage < 4:
                 d.wd_stage = 4
-                d.wd_wake_by = "plantage"
                 _LOGGER.error("Zendure %s muet depuis %ds -> PROBABLE PLANTAGE (reset physique requis)", d.name, stale)
                 persistent_notification.async_create(
                     self.hass,
@@ -406,17 +416,20 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 self.hass.bus.async_fire("zendure_device_stalled", {"device": d.name, "device_id": d.deviceId, "stale": stale})
             elif stale > t_ble and d.wd_stage < 3:
                 d.wd_stage = 3
-                d.wd_wake_by = "ble"
+                d.wd_probe_at = now
+                d.wd_probe_kind = "ble"
                 _LOGGER.warning("Zendure %s muet %ds -> toggle broker BLE", d.name, stale)
                 self.hass.async_create_task(d.watchdog_wake(3))
             elif stale > t_power and d.wd_stage < 2:
                 d.wd_stage = 2
-                d.wd_wake_by = "puissance"
+                d.wd_probe_at = now
+                d.wd_probe_kind = "puissance"
                 _LOGGER.warning("Zendure %s muet %ds -> commande de réveil", d.name, stale)
                 self.hass.async_create_task(d.watchdog_wake(2))
             elif stale > t_getall and d.wd_stage < 1:
                 d.wd_stage = 1
-                d.wd_wake_by = "getall"
+                d.wd_probe_at = now
+                d.wd_probe_kind = "getall"
                 _LOGGER.info("Zendure %s muet %ds -> getAll", d.name, stale)
                 self.hass.async_create_task(d.watchdog_wake(1))
 

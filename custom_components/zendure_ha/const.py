@@ -86,3 +86,5 @@ class SmartMode:
     WD_ALERT = 200  # notification + event : probable plantage firmware, reset physique requis
     WD_WAKE_NUDGE = 60  # W, écart de réveil quand la dernière consigne était nulle (≈ mini utile Hyper)
     WD_RECENT = 45  # s, fenêtre "a reparlé récemment" pour la garde d'entrée du toggle BLE
+    WD_RESPONSE = 8  # s, si le device republie dans cette fenêtre après un probe -> le probe l'a réveillé ;
+    #                  au-delà -> reprise SPONTANÉE (le "dernier palier atteint" ne prouve PAS la causalité)
