@@ -153,6 +153,12 @@
       },
       "fondation_dwell_invert": {
         "name": "Fondation : dwell d’inversion (cycles)"
+      },
+      "fondation_slew": {
+        "name": "Fondation : slew-rate consigne (W/cycle, 0=off)"
+      },
+      "fondation_heartbeat": {
+        "name": "Fondation : battement régulation (s, 0=off)"
       }
     },
     "sensor": {

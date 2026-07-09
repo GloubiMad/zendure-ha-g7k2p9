@@ -88,3 +88,8 @@ class SmartMode:
     WD_RECENT = 45  # s, fenêtre "a reparlé récemment" pour la garde d'entrée du toggle BLE
     WD_RESPONSE = 8  # s, si le device republie dans cette fenêtre après un probe -> le probe l'a réveillé ;
     #                  au-delà -> reprise SPONTANÉE (le "dernier palier atteint" ne prouve PAS la causalité)
+
+    # BATTEMENT DE RÉGULATION (fix racine des états figés) : la régulation est 100% event-driven sur le
+    # capteur P1 -> un P1 STABLE (même mauvais, ex. export) n'émet plus d'événement et ne se corrige jamais.
+    # Le battement relance un cycle avec le dernier P1 ; au-delà de P1_STALE_MAX il s'abstient (P1 mort).
+    P1_STALE_MAX = 120  # s, borne haute : ne pas réguler sur un P1 périmé de plus de 2 min

@@ -70,6 +70,12 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.p1meterEvent: Callable[[], None] | None = None
         self.p1_history: deque[int] = deque([25, -25], maxlen=8)
         self.p1_factor = 1
+        # BATTEMENT DE RÉGULATION (voir _regulate / regulate_now) : dernier P1 + horodatage de son
+        # dernier ÉVÉNEMENT réel, et garde de réentrance (événement P1 vs battement). Réversible :
+        # le battement est piloté par FondationEngine (number fondation_heartbeat=0 -> désactivé).
+        self._reg_last_p1 = 0
+        self._reg_last_p1_ts = datetime.min
+        self._regulating = False
         self.update_count = 0
 
         self.charge: list[ZendureDevice] = []
@@ -534,64 +540,85 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             _LOGGER.error(traceback.format_exc())
 
     async def _p1_changed(self, event: Event[EventStateChangedData]) -> None:
-        # exit if there is nothing to do
-        if not self.hass.is_running or not self.hass.is_running or (new_state := event.data["new_state"]) is None:
+        # Événement de changement d'état du capteur P1 -> mémorise + régule.
+        if not self.hass.is_running or (new_state := event.data["new_state"]) is None:
             return
-
         try:  # convert the state to a float
             p1 = int(self.p1_factor * float(new_state.state))
         except ValueError:
             return
+        self._reg_last_p1 = p1
+        self._reg_last_p1_ts = datetime.now()
+        await self._regulate(p1, self._reg_last_p1_ts)
 
-        # Get time & update simulation
-        time = datetime.now()
-        if ZendureManager.simulation:
-            self.writeSimulation(time, p1)
+    async def regulate_now(self) -> None:
+        """BATTEMENT DE RÉGULATION : relance un cycle avec le DERNIER P1 connu quand le capteur P1 est
+        stable et n'émet plus d'événement. Sans ça, un état figé (même mauvais, ex. un export résiduel)
+        ne se corrige jamais, la régulation étant 100 % event-driven sur le P1. Appelé par le timer du
+        FondationEngine, gardé par le number `fondation_heartbeat` (0 = désactivé) et la borne P1_STALE_MAX.
+        RÉVERSIBLE : mettre `fondation_heartbeat` à 0 supprime tout appel ici ; le chemin événement reste intact."""
+        if self._reg_last_p1_ts == datetime.min:
+            return  # jamais reçu de P1
+        await self._regulate(self._reg_last_p1, datetime.now())
 
-        # Check for fast delay
-        if time < self.zero_fast:
-            self.p1_history.append(p1)
+    async def _regulate(self, p1: int, time: datetime) -> None:
+        # Cœur de régulation, appelé par l'ÉVÉNEMENT P1 (_p1_changed) OU par le BATTEMENT (regulate_now).
+        # Garde de réentrance : si un cycle est déjà en cours (event vs battement), on saute pour éviter
+        # que les deux modifient l'état de distribution en même temps.
+        if self._regulating:
             return
+        self._regulating = True
+        try:
+            # update simulation
+            if ZendureManager.simulation:
+                self.writeSimulation(time, p1)
 
-        # calculate the standard deviation
-        if len(self.p1_history) > 1:
-            avg = int(sum(self.p1_history) / len(self.p1_history))
-            stddev = SmartMode.P1_STDDEV_FACTOR * max(SmartMode.P1_STDDEV_MIN, sqrt(sum([pow(i - avg, 2) for i in self.p1_history]) / len(self.p1_history)))
-            if isFast := abs(p1 - avg) > stddev or abs(p1 - self.p1_history[0]) > stddev:
-                self.p1_history.clear()
-        else:
-            isFast = False
-        self.p1_history.append(p1)
+            # Check for fast delay
+            if time < self.zero_fast:
+                self.p1_history.append(p1)
+                return
 
-        # check minimal time between updates
-        if isFast or time > self.zero_next:
-            try:
-                # prevent updates during power distribution changes
-                self.zero_fast = datetime.max
-                self.charge.clear()
-                self.charge_limit = 0
-                self.charge_optimal = 0
-                self.charge_weight = 0
-                self.discharge.clear()
-                self.discharge_bypass = 0
-                self.discharge_limit = 0
-                self.discharge_optimal = 0
-                self.discharge_produced = 0
-                self.discharge_weight = 0
-                self.idle.clear()
-                self.idle_lvlmax = 0
-                self.idle_lvlmin = 100
-                self.produced = 0
-                for fg in self.fuseGroups:
-                    fg.initPower = True
-                await self.powerChanged(p1, isFast, time)
-            except Exception as err:
-                _LOGGER.error(err)
-                _LOGGER.error(traceback.format_exc())
+            # calculate the standard deviation
+            if len(self.p1_history) > 1:
+                avg = int(sum(self.p1_history) / len(self.p1_history))
+                stddev = SmartMode.P1_STDDEV_FACTOR * max(SmartMode.P1_STDDEV_MIN, sqrt(sum([pow(i - avg, 2) for i in self.p1_history]) / len(self.p1_history)))
+                if isFast := abs(p1 - avg) > stddev or abs(p1 - self.p1_history[0]) > stddev:
+                    self.p1_history.clear()
+            else:
+                isFast = False
+            self.p1_history.append(p1)
 
-            time = datetime.now()
-            self.zero_next = time + timedelta(seconds=SmartMode.TIMEZERO)
-            self.zero_fast = time + timedelta(seconds=SmartMode.TIMEFAST)
+            # check minimal time between updates
+            if isFast or time > self.zero_next:
+                try:
+                    # prevent updates during power distribution changes
+                    self.zero_fast = datetime.max
+                    self.charge.clear()
+                    self.charge_limit = 0
+                    self.charge_optimal = 0
+                    self.charge_weight = 0
+                    self.discharge.clear()
+                    self.discharge_bypass = 0
+                    self.discharge_limit = 0
+                    self.discharge_optimal = 0
+                    self.discharge_produced = 0
+                    self.discharge_weight = 0
+                    self.idle.clear()
+                    self.idle_lvlmax = 0
+                    self.idle_lvlmin = 100
+                    self.produced = 0
+                    for fg in self.fuseGroups:
+                        fg.initPower = True
+                    await self.powerChanged(p1, isFast, time)
+                except Exception as err:
+                    _LOGGER.error(err)
+                    _LOGGER.error(traceback.format_exc())
+
+                time = datetime.now()
+                self.zero_next = time + timedelta(seconds=SmartMode.TIMEZERO)
+                self.zero_fast = time + timedelta(seconds=SmartMode.TIMEFAST)
+        finally:
+            self._regulating = False
 
     async def powerChanged(self, p1: int, isFast: bool, time: datetime) -> None:
         """Return the distribution setpoint."""

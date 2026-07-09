@@ -6,6 +6,8 @@
 #  - les deux batteries se relaient souvent     -> « hystérésis device » 5 -> 10 %
 #  - export sur un appareil qui pulse (micro-ondes, resistance) -> « dwell d'inversion » 3 -> 6
 #  - charge soutenue (cumulus, VE)              -> « dwell d'inversion » 3 -> 1
+#  - overshoot d'export sur transitoire (up qui inverse trop fort) -> baisser « slew-rate » (ex. 300)
+#  - export residuel qui traine ~15 s (P1 fige) -> « battement » corrige (0 = revenir au pur event-driven)
 type: entities
 title: Réglages — stabilité
 show_header_toggle: false
@@ -18,6 +20,10 @@ entities:
     name: Dwell d'inversion (défaut 3 cycles ≈ 15 s)
   - entity: number.zendure_manager_fondation_hyst_device
     name: Hystérésis device (défaut 5 %)
+  - entity: number.zendure_manager_fondation_slew
+    name: Slew-rate consigne (défaut 500 W/cycle — baisser = plus doux, 0 = off)
+  - entity: number.zendure_manager_fondation_heartbeat
+    name: Battement régulation (défaut 3 s — corrige les états figés, 0 = off)
 footer:
   type: graph
   entity: sensor.zendure_manager_fondation_state
