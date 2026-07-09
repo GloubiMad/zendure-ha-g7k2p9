@@ -37,7 +37,7 @@ from .const import (
 )
 from .device import DeviceSettings, ZendureDevice, ZendureLegacy
 from .entity import EntityDevice
-from .fondation import FondationEngine
+from .fondation import FondationEngine, FondationNumber
 from .fusegroup import FuseGroup
 from .number import ZendureRestoreNumber
 from .select import ZendureRestoreSelect, ZendureSelect
@@ -131,6 +131,12 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         # (une moyenne simple mentirait : glagla 5.76 kWh ne pese pas comme up 3.84 kWh).
         self.usableSocParc = ZendureSensor(self, "usableSocParc", None, "%", "battery", "measurement", 1)
         self.usableKwhParc = ZendureSensor(self, "usableKwhParc", None, "kWh", "energy_storage", None, 2)
+
+        # Watchdog MQTT : seuils d'escalade À CHAUD (s). getAll bas = visibilité ; puissance/BLE > plafond de veille.
+        self.wdGetall = FondationNumber(self, "watchdog_getall", SmartMode.WD_GETALL, 20, 300, "s")
+        self.wdPower = FondationNumber(self, "watchdog_power", SmartMode.WD_POWER, 30, 400, "s")
+        self.wdBle = FondationNumber(self, "watchdog_ble", SmartMode.WD_BLE, 40, 500, "s")
+        self.wdAlert = FondationNumber(self, "watchdog_alert", SmartMode.WD_ALERT, 60, 600, "s")
 
         # load devices
         for dev in data["deviceList"]:
@@ -343,32 +349,76 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
             self._schedule_refresh()
 
     def _mqtt_watchdog(self, now: datetime) -> None:
-        """Reconnexion si un Zendure ne répond plus : re-souscription + demande d'état (getAll)
-        + reconnexion du broker s'il est tombé. N'altère PAS la régulation (aucune consigne)."""
-        from .api import Api
+        """Watchdog v2 : détecte un device qui ne publie plus de PROPRIÉTÉS (le PINGREQ keepalive
+        ne compte pas -> muet ≠ déconnecté) et l'escalade progressivement pour le réveiller, en
+        mesurant CE QUI MARCHE. Actes sûrs et transitoires (repris par le moteur au cycle suivant).
+        Paliers en secondes = entités number À CHAUD du Manager (défauts getAll 45 · puissance 120 ·
+        BLE 160 · alerte 200). Chaque probe diffère du précédent (firmware bugué = risque de no-op)."""
+        # seuils À CHAUD (entités number) ; repli sur les défauts si non prêtes
+        t_getall = int(self.wdGetall.asNumber or SmartMode.WD_GETALL)
+        t_power = int(self.wdPower.asNumber or SmartMode.WD_POWER)
+        t_ble = int(self.wdBle.asNumber or SmartMode.WD_BLE)
+        t_alert = int(self.wdAlert.asNumber or SmartMode.WD_ALERT)
 
         for d in self.devices:
             if d.lastseen == datetime.min:
-                continue  # jamais vu / déjà marqué hors-ligne ailleurs
-            stale = (now - (d.lastseen - timedelta(minutes=5))).total_seconds()
-            if stale <= SmartMode.MQTT_STALE:
+                if d.wd_stage != 0:  # jamais vu / marqué hors-ligne ailleurs -> reset état
+                    d.wd_stage = 0
+                    d.wd_stale_since = None
+                    d.mqttStalled.update_value(0)
                 continue
-            _LOGGER.warning("Zendure %s muet depuis %ds -> reconnexion (re-souscription + getAll)", d.name, int(stale))
-            for client in (Api.mqttLocal, Api.mqttCloud):
-                if client is None:
-                    continue
-                try:
-                    if not client.is_connected():
-                        _LOGGER.warning("Broker MQTT déconnecté -> reconnect()")
-                        client.reconnect()
-                    client.subscribe(f"/{d.prodkey}/{d.deviceId}/#")
-                    client.subscribe(f"iot/{d.prodkey}/{d.deviceId}/#")
-                except Exception as err:
-                    _LOGGER.error("watchdog reconnexion %s: %s", d.name, err)
-            try:
-                d.mqttPublish(d.topic_read, {"properties": ["getAll"]}, d.mqtt or Api.mqttLocal)
-            except Exception as err:
-                _LOGGER.error("watchdog getAll %s: %s", d.name, err)
+
+            stale = int((now - (d.lastseen - timedelta(minutes=5))).total_seconds())
+            # 0 tant que le silence est normal -> pas de churn recorder ;
+            # ne monte qu'en silence ANORMAL (> getAll), où chaque seconde compte pour le diagnostic.
+            d.mqttSilence.update_value(stale if stale > t_getall else 0)
+            d.mqttBroker.update_value("cloud" if getattr(d.connection, "value", 1) == 0 else "local")
+
+            # --- cadence normale / reprise ---
+            if stale <= t_getall:
+                if d.wd_stage != 0:
+                    _LOGGER.warning("Zendure %s de nouveau actif après %ds muet (dernier probe: %s)", d.name, stale, d.wd_wake_by or "spontané")
+                    d.mqttLastWake.update_value(d.wd_wake_by or "spontané")
+                    d.mqttStalled.update_value(0)
+                    if d.wd_stage >= 4:  # lever la notif de plantage désormais résolu
+                        persistent_notification.async_dismiss(self.hass, f"zendure_stalled_{d.deviceId}")
+                    d.wd_stage = 0
+                    d.wd_stale_since = None
+                    d.wd_wake_by = ""
+                continue
+
+            # --- silence anormal : escalade (chaque palier UNE fois) ---
+            if d.wd_stale_since is None:
+                d.wd_stale_since = now
+            d.mqttStalled.update_value(1)
+
+            if stale > t_alert and d.wd_stage < 4:
+                d.wd_stage = 4
+                d.wd_wake_by = "plantage"
+                _LOGGER.error("Zendure %s muet depuis %ds -> PROBABLE PLANTAGE (reset physique requis)", d.name, stale)
+                persistent_notification.async_create(
+                    self.hass,
+                    f"{d.name} ne répond plus depuis {stale}s malgré les tentatives de réveil "
+                    f"(getAll, commande, bascule BLE). Un redémarrage manuel (interrupteur) est probablement nécessaire.",
+                    title="Zendure : onduleur figé",
+                    notification_id=f"zendure_stalled_{d.deviceId}",
+                )
+                self.hass.bus.async_fire("zendure_device_stalled", {"device": d.name, "device_id": d.deviceId, "stale": stale})
+            elif stale > t_ble and d.wd_stage < 3:
+                d.wd_stage = 3
+                d.wd_wake_by = "ble"
+                _LOGGER.warning("Zendure %s muet %ds -> toggle broker BLE", d.name, stale)
+                self.hass.async_create_task(d.watchdog_wake(3))
+            elif stale > t_power and d.wd_stage < 2:
+                d.wd_stage = 2
+                d.wd_wake_by = "puissance"
+                _LOGGER.warning("Zendure %s muet %ds -> commande de réveil", d.name, stale)
+                self.hass.async_create_task(d.watchdog_wake(2))
+            elif stale > t_getall and d.wd_stage < 1:
+                d.wd_stage = 1
+                d.wd_wake_by = "getall"
+                _LOGGER.info("Zendure %s muet %ds -> getAll", d.name, stale)
+                self.hass.async_create_task(d.watchdog_wake(1))
 
     def update_p1meter(self, p1meter: str | None) -> None:
         """Update the P1 meter sensor."""

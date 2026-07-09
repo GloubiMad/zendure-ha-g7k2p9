@@ -73,4 +73,16 @@ class SmartMode:
     POWER_START = 50  # Minimum Power (W) for starting a device
     POWER_TOLERANCE = 5  # Device-level power tolerance (W) before updating
 
-    MQTT_STALE = 40  # Secondes de silence MQTT d'un device avant reconnexion (re-souscription + getAll)
+    MQTT_STALE = 40  # (legacy) Secondes de silence MQTT avant reconnexion — remplacé par les paliers WD_* ci-dessous
+
+    # Watchdog MQTT v2 : paliers d'escalade (s) — DÉFAUTS, ajustables À CHAUD via les number du Manager
+    # (watchdog_getall / _power / _ble / _alert). Le PINGREQ keepalive k60 ne met PAS à jour lastseen
+    # -> muet ≠ déconnecté. Cadence de veille mesurée nuit 08→09/07 : p95 ~60s, max 118s (up) / 181s (glagla)
+    # -> les ACTES (puissance/BLE) doivent rester > ~120s pour ne pas partir sur de la veille normale ;
+    # le getAll (lecture inoffensive) peut être bas pour la visibilité. Chaque probe DIFFÈRE du précédent.
+    WD_GETALL = 45  # sonde légère (getAll) — bas = visibilité de tout silence, se reset si le device répond
+    WD_POWER = 120  # commande de réveil (puissance ≠ dernière consigne) — au-dessus du plafond de veille de up
+    WD_BLE = 160  # toggle broker BLE (autre puis retour au COURANT) — au-dessus du plafond de glagla (181s)
+    WD_ALERT = 200  # notification + event : probable plantage firmware, reset physique requis
+    WD_WAKE_NUDGE = 60  # W, écart de réveil quand la dernière consigne était nulle (≈ mini utile Hyper)
+    WD_RECENT = 45  # s, fenêtre "a reparlé récemment" pour la garde d'entrée du toggle BLE

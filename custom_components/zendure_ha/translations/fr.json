@@ -80,6 +80,9 @@
       "master_switch": {
         "name": "Interrupteur principal"
       },
+      "mqtt_stalled": {
+        "name": "Décrochage MQTT"
+      },
       "wifi_state": {
         "name": "État du Wi-Fi"
       },
@@ -99,6 +102,18 @@
       },
       "manual_power": {
         "name": "Puissance manuelle"
+      },
+      "watchdog_getall": {
+        "name": "Watchdog : seuil getAll (s)"
+      },
+      "watchdog_power": {
+        "name": "Watchdog : seuil commande (s)"
+      },
+      "watchdog_ble": {
+        "name": "Watchdog : seuil toggle BLE (s)"
+      },
+      "watchdog_alert": {
+        "name": "Watchdog : seuil alerte plantage (s)"
       },
       "min_soc": {
         "name": "SOC minimum"
@@ -391,6 +406,15 @@
       },
       "cmd_target": {
         "name": "Consigne moteur (cmd_target)"
+      },
+      "mqtt_silence": {
+        "name": "Silence MQTT anormal (s)"
+      },
+      "mqtt_last_wake": {
+        "name": "Dernier réveil MQTT"
+      },
+      "mqtt_broker": {
+        "name": "Broker MQTT actif"
       },
       "usable_soc": {
         "name": "Réserve utilisable (%)"

@@ -1,0 +1,42 @@
+# === 16 - Watchdog MQTT (surveillance decrochages Hyper) ===
+# A coller en carte MANUELLE. Carte HA native (l'editeur visuel fonctionne).
+# Silence anormal = 0 en fonctionnement normal ; monte en secondes des qu'un Hyper
+# ne publie plus de proprietes (le ping keepalive ne compte pas).
+# "Dernier reveil" = ce qui a sorti l'onduleur du silence : getall / puissance / ble / spontane / plantage
+#   -> c'est LA mesure : savoir quel etage sert vraiment.
+# Les 4 seuils sont ajustables A CHAUD (getall bas = visibilite ; puissance/ble hauts = pas d'acte sur la veille).
+type: entities
+title: Watchdog MQTT — décrochages Hyper
+show_header_toggle: false
+state_color: true
+entities:
+  - type: section
+    label: glagla
+  - entity: binary_sensor.hyper_2000_glagla_mqtt_stalled
+    name: Décrochage en cours
+  - entity: sensor.hyper_2000_glagla_mqtt_silence
+    name: Silence anormal (s)
+  - entity: sensor.hyper_2000_glagla_mqtt_last_wake
+    name: Dernier réveil
+  - entity: sensor.hyper_2000_glagla_mqtt_broker
+    name: Broker actif
+  - type: section
+    label: up
+  - entity: binary_sensor.hyper_2000_up_mqtt_stalled
+    name: Décrochage en cours
+  - entity: sensor.hyper_2000_up_mqtt_silence
+    name: Silence anormal (s)
+  - entity: sensor.hyper_2000_up_mqtt_last_wake
+    name: Dernier réveil
+  - entity: sensor.hyper_2000_up_mqtt_broker
+    name: Broker actif
+  - type: section
+    label: Seuils d'escalade (à chaud, secondes)
+  - entity: number.zendure_manager_watchdog_getall
+    name: getAll (sonde légère)
+  - entity: number.zendure_manager_watchdog_power
+    name: Commande de réveil
+  - entity: number.zendure_manager_watchdog_ble
+    name: Toggle broker BLE
+  - entity: number.zendure_manager_watchdog_alert
+    name: Alerte plantage
