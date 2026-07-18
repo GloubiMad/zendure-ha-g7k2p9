@@ -25,7 +25,6 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.loader import async_get_integration
 
 from .api import Api
-from .button import ZendureButton
 from .const import (
     CONF_AUTO_MQTT_USER,
     CONF_P1METER,
@@ -37,12 +36,14 @@ from .const import (
 )
 from .device import DeviceSettings, ZendureDevice, ZendureLegacy
 from .entity import EntityDevice
-from .fondation import FondationEngine, FondationNumber
+from .fondation import FondationEngine
+from .reserve import UsableReserve
+from .simulation import SimulationLog
+from .watchdog import MqttWatchdog
 from .fusegroup import FuseGroup
 from .number import ZendureRestoreNumber
 from .select import ZendureRestoreSelect, ZendureSelect
 from .sensor import ZendureSensor
-from .switch import ZendureSwitch
 
 SCAN_INTERVAL = timedelta(seconds=60)
 
@@ -70,12 +71,6 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.p1meterEvent: Callable[[], None] | None = None
         self.p1_history: deque[int] = deque([25, -25], maxlen=8)
         self.p1_factor = 1
-        # BATTEMENT DE RÉGULATION (voir _regulate / regulate_now) : dernier P1 + horodatage de son
-        # dernier ÉVÉNEMENT réel, et garde de réentrance (événement P1 vs battement). Réversible :
-        # le battement est piloté par FondationEngine (number fondation_heartbeat=0 -> désactivé).
-        self._reg_last_p1 = 0
-        self._reg_last_p1_ts = datetime.min
-        self._regulating = False
         self.update_count = 0
 
         self.charge: list[ZendureDevice] = []
@@ -100,6 +95,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         # Moteur alternatif « fondation » (mode d'opération smart_fondation) — n'altère pas le moteur existant
         self.fondation = FondationEngine(self)
+        self.watchdog = MqttWatchdog(self)
+        self.reserve = UsableReserve(self)
+        self.sim = SimulationLog(self)
         self.setpoint = 0  # dernier setpoint du moteur actif (observabilité simulation.csv)
 
     async def loadDevices(self) -> None:
@@ -125,24 +123,15 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         )
         self.operationstate = ZendureSensor(self, "operation_state")
         self.fondation.createEntities()
-        # Simulation : switch LIVE (sans reload, en plus de l'option config) + bouton rotate
-        self.simulationSwitch = ZendureSwitch(self, "simulation_log", self.update_simulation, None, None, ZendureManager.simulation)
-        self.simulationRotate = ZendureButton(self, "simulation_rotate", self.rotate_simulation)
+        self.sim.createEntities()
         self.manualpower = ZendureRestoreNumber(self, "manual_power", None, None, "W", "power", 12000, -12000, NumberMode.BOX, True)
         self.availableKwh = ZendureSensor(self, "available_kwh", None, "kWh", "energy_storage", None, 1)
         self.totalKwh = ZendureSensor(self, "total_kwh", None, "kWh", "energy_storage", "measurement", 2)
         self.power = ZendureSensor(self, "power", None, "W", "power", "measurement", 0)
         self.globalSoc = ZendureSensor(self, "global_soc", None, "%", "battery", "measurement", 1)
-        # Reserve exploitable du PARC, bornee par minSoc/socSet et PONDEREE PAR LA CAPACITE
-        # (une moyenne simple mentirait : glagla 5.76 kWh ne pese pas comme up 3.84 kWh).
-        self.usableSocParc = ZendureSensor(self, "usableSocParc", None, "%", "battery", "measurement", 1)
-        self.usableKwhParc = ZendureSensor(self, "usableKwhParc", None, "kWh", "energy_storage", None, 2)
+        self.reserve.createManagerEntities()
 
-        # Watchdog MQTT : seuils d'escalade À CHAUD (s). getAll bas = visibilité ; puissance/BLE > plafond de veille.
-        self.wdGetall = FondationNumber(self, "watchdog_getall", SmartMode.WD_GETALL, 20, 300, "s")
-        self.wdPower = FondationNumber(self, "watchdog_power", SmartMode.WD_POWER, 30, 400, "s")
-        self.wdBle = FondationNumber(self, "watchdog_ble", SmartMode.WD_BLE, 40, 500, "s")
-        self.wdAlert = FondationNumber(self, "watchdog_alert", SmartMode.WD_ALERT, 60, 600, "s")
+        self.watchdog.createManagerEntities()
 
         # load devices
         for dev in data["deviceList"]:
@@ -191,6 +180,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
 
         self.devices = list(Api.devices.values())
         _LOGGER.info("Loaded %s devices", len(self.devices))
+        self.watchdog.createDeviceEntities()
+        self.reserve.createDeviceEntities()
+        self.fondation.createDeviceEntities()
 
         # initialize the api & p1 meter
         self.api.Init(self.config_entry.data, mqtt)
@@ -332,112 +324,16 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.update_count += 1
         self.totalKwh.update_value(kwh)
 
-        # Reserve exploitable du parc : somme des kWh utilisables / somme des kWh utilisables MAX.
-        # Ponderee par la capacite de fait, puisqu'on additionne des kWh et non des pourcentages.
-        usable = 0.0
-        usable_max = 0.0
-        for d in self.devices:
-            lo = float(d.minSoc.asNumber)
-            hi = float(d.socSet.asNumber)
-            if hi - lo <= 0 or d.kWh <= 0:
-                continue
-            usable += max(0.0, (float(d.electricLevel.asNumber) - lo) / 100.0 * d.kWh)
-            usable_max += (hi - lo) / 100.0 * d.kWh
-        self.usableKwhParc.update_value(round(usable, 2))
-        self.usableSocParc.update_value(round(usable / usable_max * 100.0, 1) if usable_max > 0 else 0)
+        self.reserve.update()
 
         # Reconnexion des devices muets (décrochage MQTT observé : glagla silencieuse 2 min,
         # sortie figée, le moteur régulait dans le vide). Actions SÛRES uniquement.
-        self._mqtt_watchdog(time)
+        self.watchdog.tick(time)
 
         # Manually update the timer
         if self.hass and self.hass.loop.is_running():
             self._schedule_refresh()
 
-    def _mqtt_watchdog(self, now: datetime) -> None:
-        """Watchdog v2 : détecte un device qui ne publie plus de PROPRIÉTÉS (le PINGREQ keepalive
-        ne compte pas -> muet ≠ déconnecté) et l'escalade progressivement pour le réveiller, en
-        mesurant CE QUI MARCHE. Actes sûrs et transitoires (repris par le moteur au cycle suivant).
-        Paliers en secondes = entités number À CHAUD du Manager (défauts getAll 45 · puissance 120 ·
-        BLE 160 · alerte 200). Chaque probe diffère du précédent (firmware bugué = risque de no-op)."""
-        # seuils À CHAUD (entités number) ; repli sur les défauts si non prêtes
-        t_getall = int(self.wdGetall.asNumber or SmartMode.WD_GETALL)
-        t_power = int(self.wdPower.asNumber or SmartMode.WD_POWER)
-        t_ble = int(self.wdBle.asNumber or SmartMode.WD_BLE)
-        t_alert = int(self.wdAlert.asNumber or SmartMode.WD_ALERT)
-
-        for d in self.devices:
-            if d.lastseen == datetime.min:
-                if d.wd_stage != 0:  # jamais vu / marqué hors-ligne ailleurs -> reset état
-                    d.wd_stage = 0
-                    d.wd_stale_since = None
-                    d.wd_probe_at = None
-                    d.wd_probe_kind = ""
-                    d.mqttStalled.update_value(0)
-                continue
-
-            stale = int((now - (d.lastseen - timedelta(minutes=5))).total_seconds())
-            # 0 tant que le silence est normal -> pas de churn recorder ;
-            # ne monte qu'en silence ANORMAL (> getAll), où chaque seconde compte pour le diagnostic.
-            d.mqttSilence.update_value(stale if stale > t_getall else 0)
-            d.mqttBroker.update_value("cloud" if getattr(d.connection, "value", 1) == 0 else "local")
-
-            # --- cadence normale / reprise ---
-            if stale <= t_getall:
-                if d.wd_stage != 0:
-                    # attribution HONNÊTE : le device n'est "réveillé par" un probe QUE s'il a republié
-                    # dans les WD_RESPONSE s suivant ce probe ; sinon la reprise est spontanée (ou reset manuel).
-                    last_msg = d.lastseen - timedelta(minutes=5)
-                    if d.wd_probe_at is not None and 0 <= (last_msg - d.wd_probe_at).total_seconds() <= SmartMode.WD_RESPONSE:
-                        wake_by = d.wd_probe_kind
-                    else:
-                        wake_by = "spontané"
-                    _LOGGER.warning("Zendure %s de nouveau actif après %ds muet (réveil: %s)", d.name, stale, wake_by)
-                    d.wd_wake_by = wake_by
-                    d.mqttLastWake.update_value(wake_by)
-                    d.mqttStalled.update_value(0)
-                    if d.wd_stage >= 4:  # lever la notif de plantage désormais résolu
-                        persistent_notification.async_dismiss(self.hass, f"zendure_stalled_{d.deviceId}")
-                    d.wd_stage = 0
-                    d.wd_stale_since = None
-                    d.wd_probe_at = None
-                    d.wd_probe_kind = ""
-                continue
-
-            # --- silence anormal : escalade (chaque palier UNE fois) ---
-            if d.wd_stale_since is None:
-                d.wd_stale_since = now
-            d.mqttStalled.update_value(1)
-
-            if stale > t_alert and d.wd_stage < 4:
-                d.wd_stage = 4
-                _LOGGER.error("Zendure %s muet depuis %ds -> PROBABLE PLANTAGE (reset physique requis)", d.name, stale)
-                persistent_notification.async_create(
-                    self.hass,
-                    f"{d.name} ne répond plus depuis {stale}s malgré les tentatives de réveil "
-                    f"(getAll, commande, bascule BLE). Un redémarrage manuel (interrupteur) est probablement nécessaire.",
-                    title="Zendure : onduleur figé",
-                    notification_id=f"zendure_stalled_{d.deviceId}",
-                )
-                self.hass.bus.async_fire("zendure_device_stalled", {"device": d.name, "device_id": d.deviceId, "stale": stale})
-            elif stale > t_ble and d.wd_stage < 3:
-                d.wd_stage = 3
-                d.wd_probe_at = now
-                d.wd_probe_kind = "ble"
-                _LOGGER.warning("Zendure %s muet %ds -> toggle broker BLE", d.name, stale)
-                self.hass.async_create_task(d.watchdog_wake(3))
-            elif stale > t_power and d.wd_stage < 2:
-                d.wd_stage = 2
-                d.wd_probe_at = now
-                d.wd_probe_kind = "puissance"
-                _LOGGER.warning("Zendure %s muet %ds -> commande de réveil", d.name, stale)
-                self.hass.async_create_task(d.watchdog_wake(2))
-            elif stale > t_getall and d.wd_stage < 1:
-                d.wd_stage = 1
-                d.wd_probe_at = now
-                d.wd_probe_kind = "getall"
-                _LOGGER.info("Zendure %s muet %ds -> getAll", d.name, stale)
-                self.hass.async_create_task(d.watchdog_wake(1))
 
     def update_p1meter(self, p1meter: str | None) -> None:
         """Update the P1 meter sensor."""
@@ -451,174 +347,68 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         else:
             self.p1meterEvent = None
 
-    async def update_simulation(self, entity: ZendureSwitch, value: Any) -> None:
-        """Active/désactive le log simulation À CHAUD (sans reload de l'intégration)."""
-        ZendureManager.simulation = bool(value)
-        entity.update_value(int(bool(value)))
-        _LOGGER.info("Simulation log => %s", ZendureManager.simulation)
-
-    async def rotate_simulation(self, _button: ZendureButton) -> None:
-        """Renomme simulation.csv en simulation_YYYYMMDD_HHMMSS.csv ; un nouveau est créé au prochain cycle."""
-        try:
-            path = Path(self.hass.config.path("simulation.csv"))
-            if path.exists():
-                newname = path.with_name(f"simulation_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
-                path.rename(newname)
-                _LOGGER.info("Simulation log rotated => %s", newname)
-        except Exception as err:
-            _LOGGER.error("rotate_simulation: %s", err)
-
     def writeSimulation(self, time: datetime, p1: int) -> None:
-        # Format ÉTENDU (identique au fork clean-base, compatible visualiseurs/outils de rejeu).
-        # Chemin explicite dans /config (le CWD de HA n'est pas garanti).
-        try:
-            path = Path(self.hass.config.path("simulation.csv"))
-            if path.exists() is False:
-                _LOGGER.info("Creating simulation log: %s", path)
-                with path.open("w") as f:
-                    f.write(
-                        "Time;P1;Operation;Battery;Solar;Home;SetPoint;--;"
-                        + ";".join(
-                            [
-                                f"bat;Prod;Home;Cmd;Soc;Conn;ChLim;St;Age;Grid;Byp;Tmp;CTmp;{
-                                    json.dumps(
-                                        DeviceSettings(
-                                            d.name,
-                                            # fuseGrp n'est PAS assigné pour un device hors fusegroup
-                                            # (annotation sans valeur dans device.py) -> ne pas crasher.
-                                            fg.name if (fg := getattr(d, 'fuseGrp', None)) is not None else '-',
-                                            d.charge_limit,
-                                            d.discharge_limit,
-                                            d.maxSolar,
-                                            d.kWh,
-                                            d.socSet.asNumber,
-                                            d.minSoc.asNumber,
-                                        ),
-                                        default=vars,
-                                    )
-                                }"
-                                for d in self.devices
-                            ]
-                        )
-                        + "\n"
-                    )
-
-            with path.open("a") as f:
-                data = ""
-                tbattery = 0
-                tsolar = 0
-                thome = 0
-
-                for d in self.devices:
-                    tbattery += (pwr_battery := d.batteryOutput.asInt - d.batteryInput.asInt)
-                    tsolar += (pwr_solar := d.solarInput.asInt)
-                    thome += (pwr_home := d.homeOutput.asInt - d.homeInput.asInt)
-                    # Cmd = consigne manager AVANT clamp (à comparer à Home réalisé) ; St = DeviceState
-                    # (0=OFFLINE 1=SOCEMPTY 2=INACTIVE 3=SOCFULL 4=ACTIVE) ; Age = secondes depuis le dernier
-                    # message réel (-1 si jamais vu ; l'amont stampe lastseen = msg + 5 min).
-                    age = int((time - (d.lastseen - timedelta(minutes=5))).total_seconds()) if d.lastseen != datetime.min else -1
-                    # Grid = gridReverse (0=disabled 1=allow 2=forbidden ; -1 si non reçu) ; Byp = exports_bypass.
-                    gr = d.entities.get("gridReverse")
-                    grv = getattr(gr, "value", None) if gr is not None else None
-                    grid = grv if grv is not None else -1
-                    # Tmp = température onduleur, CTmp = température cellule max (BMS) ; "" si non publié.
-                    te = d.entities.get("hyperTmp")
-                    ce = d.entities.get("maxTemp")
-                    tmp = te.native_value if te is not None and getattr(te, "native_value", None) is not None else ""
-                    ctmp = ce.native_value if ce is not None and getattr(ce, "native_value", None) is not None else ""
-                    data += (
-                        f";{pwr_battery};{pwr_solar};{pwr_home};{d.cmd_target};{d.electricLevel.asInt}"
-                        f";{d.connectionStatus.asInt};{d.charge_limit};{d.state.value};{age};{grid};{int(d.exports_bypass)}"
-                        f";{tmp};{ctmp}"
-                    )
-
-                # Queue de ligne debug du moteur fondation (colonne finale, ignorée par les parseurs).
-                tail = f";{self.fondation.debug}" if self.operation == ManagerMode.FONDATION else ""
-                f.write(f"{time};{p1};{self.operation};{tbattery};{tsolar};{thome};{self.setpoint};" + data + tail + "\n")
-        except Exception as err:
-            _LOGGER.error("writeSimulation: %s", err)
-            _LOGGER.error(traceback.format_exc())
+        self.sim.write(time, p1)
 
     async def _p1_changed(self, event: Event[EventStateChangedData]) -> None:
-        # Événement de changement d'état du capteur P1 -> mémorise + régule.
-        if not self.hass.is_running or (new_state := event.data["new_state"]) is None:
+        # exit if there is nothing to do
+        if not self.hass.is_running or not self.hass.is_running or (new_state := event.data["new_state"]) is None:
             return
+
         try:  # convert the state to a float
             p1 = int(self.p1_factor * float(new_state.state))
         except ValueError:
             return
-        self._reg_last_p1 = p1
-        self._reg_last_p1_ts = datetime.now()
-        await self._regulate(p1, self._reg_last_p1_ts)
 
-    async def regulate_now(self) -> None:
-        """BATTEMENT DE RÉGULATION : relance un cycle avec le DERNIER P1 connu quand le capteur P1 est
-        stable et n'émet plus d'événement. Sans ça, un état figé (même mauvais, ex. un export résiduel)
-        ne se corrige jamais, la régulation étant 100 % event-driven sur le P1. Appelé par le timer du
-        FondationEngine, gardé par le number `fondation_heartbeat` (0 = désactivé) et la borne P1_STALE_MAX.
-        RÉVERSIBLE : mettre `fondation_heartbeat` à 0 supprime tout appel ici ; le chemin événement reste intact."""
-        if self._reg_last_p1_ts == datetime.min:
-            return  # jamais reçu de P1
-        await self._regulate(self._reg_last_p1, datetime.now())
+        # Get time & update simulation
+        time = datetime.now()
+        if ZendureManager.simulation:
+            self.writeSimulation(time, p1)
 
-    async def _regulate(self, p1: int, time: datetime) -> None:
-        # Cœur de régulation, appelé par l'ÉVÉNEMENT P1 (_p1_changed) OU par le BATTEMENT (regulate_now).
-        # Garde de réentrance : si un cycle est déjà en cours (event vs battement), on saute pour éviter
-        # que les deux modifient l'état de distribution en même temps.
-        if self._regulating:
-            return
-        self._regulating = True
-        try:
-            # update simulation
-            if ZendureManager.simulation:
-                self.writeSimulation(time, p1)
-
-            # Check for fast delay
-            if time < self.zero_fast:
-                self.p1_history.append(p1)
-                return
-
-            # calculate the standard deviation
-            if len(self.p1_history) > 1:
-                avg = int(sum(self.p1_history) / len(self.p1_history))
-                stddev = SmartMode.P1_STDDEV_FACTOR * max(SmartMode.P1_STDDEV_MIN, sqrt(sum([pow(i - avg, 2) for i in self.p1_history]) / len(self.p1_history)))
-                if isFast := abs(p1 - avg) > stddev or abs(p1 - self.p1_history[0]) > stddev:
-                    self.p1_history.clear()
-            else:
-                isFast = False
+        # Check for fast delay
+        if time < self.zero_fast:
             self.p1_history.append(p1)
+            return
 
-            # check minimal time between updates
-            if isFast or time > self.zero_next:
-                try:
-                    # prevent updates during power distribution changes
-                    self.zero_fast = datetime.max
-                    self.charge.clear()
-                    self.charge_limit = 0
-                    self.charge_optimal = 0
-                    self.charge_weight = 0
-                    self.discharge.clear()
-                    self.discharge_bypass = 0
-                    self.discharge_limit = 0
-                    self.discharge_optimal = 0
-                    self.discharge_produced = 0
-                    self.discharge_weight = 0
-                    self.idle.clear()
-                    self.idle_lvlmax = 0
-                    self.idle_lvlmin = 100
-                    self.produced = 0
-                    for fg in self.fuseGroups:
-                        fg.initPower = True
-                    await self.powerChanged(p1, isFast, time)
-                except Exception as err:
-                    _LOGGER.error(err)
-                    _LOGGER.error(traceback.format_exc())
+        # calculate the standard deviation
+        if len(self.p1_history) > 1:
+            avg = int(sum(self.p1_history) / len(self.p1_history))
+            stddev = SmartMode.P1_STDDEV_FACTOR * max(SmartMode.P1_STDDEV_MIN, sqrt(sum([pow(i - avg, 2) for i in self.p1_history]) / len(self.p1_history)))
+            if isFast := abs(p1 - avg) > stddev or abs(p1 - self.p1_history[0]) > stddev:
+                self.p1_history.clear()
+        else:
+            isFast = False
+        self.p1_history.append(p1)
 
-                time = datetime.now()
-                self.zero_next = time + timedelta(seconds=SmartMode.TIMEZERO)
-                self.zero_fast = time + timedelta(seconds=SmartMode.TIMEFAST)
-        finally:
-            self._regulating = False
+        # check minimal time between updates
+        if isFast or time > self.zero_next:
+            try:
+                # prevent updates during power distribution changes
+                self.zero_fast = datetime.max
+                self.charge.clear()
+                self.charge_limit = 0
+                self.charge_optimal = 0
+                self.charge_weight = 0
+                self.discharge.clear()
+                self.discharge_bypass = 0
+                self.discharge_limit = 0
+                self.discharge_optimal = 0
+                self.discharge_produced = 0
+                self.discharge_weight = 0
+                self.idle.clear()
+                self.idle_lvlmax = 0
+                self.idle_lvlmin = 100
+                self.produced = 0
+                for fg in self.fuseGroups:
+                    fg.initPower = True
+                await self.powerChanged(p1, isFast, time)
+            except Exception as err:
+                _LOGGER.error(err)
+                _LOGGER.error(traceback.format_exc())
+
+            time = datetime.now()
+            self.zero_next = time + timedelta(seconds=SmartMode.TIMEZERO)
+            self.zero_fast = time + timedelta(seconds=SmartMode.TIMEFAST)
 
     async def powerChanged(self, p1: int, isFast: bool, time: datetime) -> None:
         """Return the distribution setpoint."""

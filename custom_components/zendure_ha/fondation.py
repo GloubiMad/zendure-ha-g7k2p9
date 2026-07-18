@@ -18,12 +18,10 @@ pour pouvoir les faire varier selon la journée et automatiser leur réglage plu
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
 
 from homeassistant.components.number import NumberMode
-from homeassistant.helpers.event import async_track_time_interval
 
-from .const import DeviceState, ManagerState, SmartMode
+from .const import DeviceState, ManagerState
 from .device import ZendureDevice
 from .entity import EntityDevice
 from .number import ZendureRestoreNumber
@@ -64,7 +62,10 @@ class FondationEngine:
         self.dir_prev: dict[str, float] = {}   # dernière consigne appliquée (dwell d'inversion)
         self.dir_pend: dict[str, int] = {}     # cycles consécutifs de signe opposé demandé
         self.cmd_applied: dict[str, int] = {}  # dernière consigne RÉELLEMENT appliquée (slew-rate)
-        self._heartbeat_unsub = None           # unsub du timer de battement de régulation
+        # Consigne envoyée au device (signée : + décharge / − charge). Lue par simulation.csv et par
+        # le watchdog (choix d'une commande de réveil DIFFÉRENTE). Vit ici : c'est le moteur qui commande.
+        self.cmd_target: dict[str, int] = {}
+        self._cmd_ent: dict[str, object] = {}
         self.debug = ""                        # queue de ligne pour simulation.csv
         # Comportement producteur plein : False=STORE (stocke le surplus dans les batteries, écrête
         # le reste) ; True=BLOCK (rien ne sort, maison sur réseau). Le mapping vers un mode gridReverse
@@ -107,28 +108,17 @@ class FondationEngine:
         # overshoot sur transitoire (ex. up qui saute de -744 charge à +1012 décharge d'un coup -> export).
         # Complémentaire du dwell (qui bloque l'INVERSION) : ici on RAMPE l'amplitude. 0 = désactivé.
         self.slew = FondationNumber(m, "fondation_slew", 500, 0, 1200, "W")
-        # BATTEMENT (A) : période où l'on RELANCE la régulation avec le dernier P1 si le capteur P1 est
-        # resté silencieux plus longtemps (état figé qui ne se corrige pas, la régulation étant 100 %
-        # event-driven sur le P1). 0 = désactivé (retour au comportement pur event-driven).
-        self.heartbeat = FondationNumber(m, "fondation_heartbeat", 3, 0, 30, "s")
-        # timer fixe 2 s ; le number ci-dessus décide À CHAUD quand agir. Nettoyé à l'unload de l'entrée.
-        self._heartbeat_unsub = async_track_time_interval(m.hass, self._heartbeat_tick, timedelta(seconds=2))
-        if getattr(m, "config_entry", None) is not None:
-            m.config_entry.async_on_unload(self._heartbeat_unsub)
 
-    async def _heartbeat_tick(self, _now) -> None:
-        """Battement : si le capteur P1 n'a rien émis depuis `fondation_heartbeat` s (état stable) et
-        pas trop longtemps (< P1_STALE_MAX, sinon P1 probablement mort), relance un cycle de régulation
-        avec le dernier P1. C'est le fix racine des états figés (voir manager.regulate_now)."""
-        gap = int(self.heartbeat.asNumber)
-        if gap <= 0:
-            return  # désactivé -> comportement pur event-driven
-        m = self.manager
-        if m._reg_last_p1_ts == datetime.min:
-            return  # jamais reçu de P1
-        elapsed = (datetime.now() - m._reg_last_p1_ts).total_seconds()
-        if gap <= elapsed <= SmartMode.P1_STALE_MAX:
-            await m.regulate_now()
+    def createDeviceEntities(self) -> None:
+        """Capteur de consigne par onduleur. À appeler APRÈS le chargement des devices.
+        C'est LE graphe de diagnostic : commande vs réalisé (outputHomePower)."""
+        for d in self.manager.devices:
+            if d.deviceId not in self._cmd_ent:
+                self._cmd_ent[d.deviceId] = ZendureSensor(d, "cmdTarget", None, "W", "power", "measurement", state=0)
+
+    def cmd_of(self, d) -> int:
+        """Dernière consigne envoyée à ce device (0 si le moteur ne l'a pas encore piloté)."""
+        return self.cmd_target.get(d.deviceId, 0)
 
     async def update(self, p1: int) -> None:
         """Un cycle de régulation. Appelé par powerChanged quand operation == FONDATION."""
@@ -501,6 +491,9 @@ class FondationEngine:
         for d in devices:
             c = int(cmd[d])
             self.cmd_applied[d.deviceId] = c  # mémorise pour le slew-rate du prochain cycle
+            self.cmd_target[d.deviceId] = c
+            if (ent := self._cmd_ent.get(d.deviceId)) is not None:
+                ent.update_value(c)
             setpoint += c
             if c > 0:
                 await d.power_discharge(c)

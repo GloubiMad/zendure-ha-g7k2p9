@@ -140,15 +140,6 @@ class ZendureDevice(EntityDevice):
         self.actualKwh: float = 0.0
         self.state: DeviceState = DeviceState.OFFLINE
         self.exports_bypass: bool = True
-        self.cmd_target: int = 0  # dernière consigne manager (observabilité simulation.csv, aucun effet régulation)
-
-        # Watchdog MQTT v2 : état d'escalade par device (piloté par manager._mqtt_watchdog)
-        self.wd_stale_since: datetime | None = None
-        self.wd_stage: int = 0  # 0=OK, 1=getAll, 2=puissance, 3=ble, 4=plantage
-        self.wd_wake_by: str = ""  # label calculé À LA REPRISE : probe efficace si réponse < WD_RESPONSE, sinon "spontané"
-        self.wd_probe_at: datetime | None = None  # instant du dernier probe (pour mesurer sa latence de réponse)
-        self.wd_probe_kind: str = ""  # type du dernier probe : getall / puissance / ble
-        self.wd_ble_running: bool = False  # single-flight du toggle BLE
 
         self.create_entities()
 
@@ -161,14 +152,6 @@ class ZendureDevice(EntityDevice):
         self.socStatus = ZendureSensor(self, "socStatus", state=0)
         self.socLimit = ZendureSensor(self, "socLimit", state=0)
         self.byPass = ZendureSensor(self, "pass", state=0)
-        # Consigne envoyée par le manager (signée : + décharge / − charge), AVANT clamp.
-        # À comparer au réalisé (outputHomePower) : c'est LE capteur de diagnostic du moteur.
-        self.cmdTarget = ZendureSensor(self, "cmdTarget", None, "W", "power", "measurement", state=0)
-        # Reserve REELLEMENT exploitable, bornee par minSoc/socSet :
-        #   0 % = au plancher minSoc (plus rien a donner), 100 % = au plafond socSet.
-        # (un SoC de 15 % avec minSoc=15 % vaut 0 % utilisable, pas 15 %)
-        self.usableSoc = ZendureSensor(self, "usableSoc", None, "%", "battery", "measurement", 1)
-        self.usableKwh = ZendureSensor(self, "usableKwh", None, "kWh", "energy_storage", None, 2)
 
         fuseGroups = {0: "unused", 1: "owncircuit", 2: "group800", 3: "group800_2400", 4: "group1200", 5: "group2000", 6: "group2400", 7: "group3600"}
         self.fuseGroup = ZendureRestoreSelect(self, "fuseGroup", fuseGroups, None)
@@ -187,12 +170,6 @@ class ZendureDevice(EntityDevice):
         self.availableKwh = ZendureSensor(self, "available_kwh", None, "kWh", "energy_storage", None, 1)
         self.totalKwh = ZendureSensor(self, "total_kwh", None, "kWh", "energy_storage", "measurement", 2)
         self.connectionStatus = ZendureSensor(self, "connectionStatus")
-        # Observabilité watchdog MQTT v2 (alimentées par manager._mqtt_watchdog).
-        # Réutilisables pour les devices API-local (ZenSDK) plus tard : elles vivent dans la classe de base.
-        self.mqttSilence = ZendureSensor(self, "mqttSilence", None, "s", "duration", "measurement", 0, state=0)
-        self.mqttStalled = ZendureBinarySensor(self, "mqttStalled", None, "problem")
-        self.mqttLastWake = ZendureSensor(self, "mqttLastWake", state="—")
-        self.mqttBroker = ZendureSensor(self, "mqttBroker", state="local")
         self.connection: ZendureRestoreSelect
         self.bleAdapter: ZendureRestoreSelect | None = None
         self.remainingTime = ZendureSensor(self, "remainingTime", None, "h", "duration", "measurement")
@@ -242,22 +219,6 @@ class ZendureDevice(EntityDevice):
                 self.connectionStatus.update_value(10)
         except Exception:
             self.connectionStatus.update_value(0)
-
-        self.updateUsable()
-
-    def updateUsable(self) -> None:
-        """Reserve exploitable entre minSoc et socSet (% et kWh)."""
-        try:
-            lo = float(self.minSoc.asNumber)
-            hi = float(self.socSet.asNumber)
-            soc = float(self.electricLevel.asNumber)
-            span = hi - lo
-            if span <= 0 or self.kWh <= 0:
-                return
-            self.usableSoc.update_value(round(max(0.0, min(100.0, (soc - lo) / span * 100.0)), 1))
-            self.usableKwh.update_value(round(max(0.0, (soc - lo) / 100.0 * self.kWh), 2))
-        except Exception as err:
-            _LOGGER.debug("updateUsable %s: %s", self.name, err)
 
     def entityUpdate(self, key: Any, value: Any) -> bool:
         # update entity state
@@ -680,8 +641,6 @@ class ZendureDevice(EntityDevice):
 
     async def power_charge(self, power: int) -> int:
         """Set charge power."""
-        self.cmd_target = power  # consigne AVANT clamp (observabilité)
-        self.cmdTarget.update_value(power)
         power = min(0, max(power, self.charge_limit))
         """power is here a negative value, but homeInput and homeOutput are always positive"""
         if abs(power + self.homeInput.asInt - self.homeOutput.asInt) <= SmartMode.POWER_TOLERANCE:
@@ -695,8 +654,6 @@ class ZendureDevice(EntityDevice):
 
     async def power_discharge(self, power: int) -> int:
         """Set discharge power."""
-        self.cmd_target = power  # consigne AVANT clamp (observabilité)
-        self.cmdTarget.update_value(power)
         power = max(0, min(power, self.discharge_limit))
         if abs(power - self.homeOutput.asInt + self.homeInput.asInt) <= SmartMode.POWER_TOLERANCE:
             _LOGGER.info("Power discharge %s => no action [power %s]", self.name, power)
@@ -715,11 +672,6 @@ class ZendureDevice(EntityDevice):
     def pwr_offgrid(self) -> int:
         """Get the offgrid power."""
         return 0
-
-    async def watchdog_wake(self, _stage: int) -> None:
-        """Tentative de réveil d'un device muet. No-op par défaut ;
-        surchargée par les classes qui savent le faire (MQTT+BLE pour Legacy, HTTP pour ZenSDK plus tard)."""
-        return
 
 
 class ZendureLegacy(ZendureDevice):
@@ -761,62 +713,6 @@ class ZendureLegacy(ZendureDevice):
             return True
 
         return super().mqttMessage(topic, payload)
-
-    async def watchdog_wake(self, stage: int) -> None:
-        """Escalade de réveil (voir manager._mqtt_watchdog). Chaque acte diffère du précédent."""
-        from .api import Api
-
-        if stage == 1:  # sonde légère : demande d'état
-            self.mqttPublish(self.topic_read, {"properties": ["getAll"]}, self.mqtt or Api.mqttLocal)
-
-        elif stage == 2:  # commande de réveil DIFFÉRENTE de la dernière consigne (anti no-op)
-            if abs(self.cmd_target) > 10:
-                # dernière consigne non nulle (ex. export bloqué) -> couper : différent ET sûr
-                _LOGGER.warning("Watchdog %s: réveil power_off (dernière consigne %dW)", self.name, self.cmd_target)
-                await self.power_off()
-            else:
-                # dernière consigne nulle -> petit écart non nul (write reçu même si non réalisable)
-                _LOGGER.warning("Watchdog %s: réveil discharge %dW (dernière consigne 0)", self.name, SmartMode.WD_WAKE_NUDGE)
-                await self.discharge(SmartMode.WD_WAKE_NUDGE)
-
-        elif stage == 3:  # toggle broker via BLE (contourne le réseau figé), en tâche de fond
-            self.hass.async_create_task(self._watchdog_ble_toggle())
-
-    async def _watchdog_ble_toggle(self) -> None:
-        """Force une re-provision réseau par Bluetooth : bascule vers l'AUTRE broker puis
-        revient au COURANT. Garde d'entrée (annule si le device a reparlé), retour au courant
-        garanti (jamais d'orphelin), single-flight. Le BLE est indépendant du réseau figé."""
-        from .api import Api
-
-        if self.wd_ble_running:
-            return
-        self.wd_ble_running = True
-        try:
-            # garde d'entrée : si le device a reparlé récemment, ne rien toucher
-            if self.lastseen != datetime.min:
-                stale = (datetime.now() - (self.lastseen - timedelta(minutes=5))).total_seconds()
-                if stale < SmartMode.WD_RECENT:
-                    _LOGGER.info("Watchdog %s: a reparlé avant le toggle BLE -> annulé", self.name)
-                    return
-
-            current = getattr(self.connection, "value", 1)  # 0=cloud, 1=local
-            if current == 0:  # sur cloud : cloud -> local -> cloud
-                other, home = Api.mqttLocal, Api.mqttCloud
-            else:  # sur local : local -> cloud -> local
-                other, home = Api.mqttCloud, Api.mqttLocal
-            _LOGGER.warning("Watchdog %s: toggle BLE (courant=%s)", self.name, "cloud" if current == 0 else "local")
-            try:
-                if other is not None:
-                    await self.bleMqtt(other)
-                    await asyncio.sleep(10)
-            finally:
-                # retour au broker COURANT garanti, même si l'aller a échoué
-                if home is not None:
-                    await self.bleMqtt(home)
-        except Exception as err:
-            _LOGGER.error("Watchdog %s: toggle BLE échec: %s", self.name, err)
-        finally:
-            self.wd_ble_running = False
 
 
 class ZendureZenSdk(ZendureDevice):
