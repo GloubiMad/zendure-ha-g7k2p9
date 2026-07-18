@@ -42,6 +42,7 @@ class ManagerMode(Enum):
     MATCHING_DISCHARGE = 3
     MATCHING_CHARGE = 4
     STORE_SOLAR = 5
+    FONDATION = 6
 
 
 class ManagerState(Enum):
@@ -71,3 +72,5 @@ class SmartMode:
 
     POWER_START = 50  # Minimum Power (W) for starting a device
     POWER_TOLERANCE = 5  # Device-level power tolerance (W) before updating
+
+    MQTT_STALE = 40  # Secondes de silence MQTT d'un device avant reconnexion (re-souscription + getAll)

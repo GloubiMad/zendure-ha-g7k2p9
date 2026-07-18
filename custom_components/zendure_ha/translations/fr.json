@@ -71,11 +71,17 @@
     "button": {
       "mqtt_reset": {
         "name": "Reset connexion"
+      },
+      "simulation_rotate": {
+        "name": "Rotation du log simulation"
       }
     },
     "binary_sensor": {
       "master_switch": {
         "name": "Interrupteur principal"
+      },
+      "mqtt_stalled": {
+        "name": "Décrochage MQTT"
       },
       "wifi_state": {
         "name": "État du Wi-Fi"
@@ -97,11 +103,62 @@
       "manual_power": {
         "name": "Puissance manuelle"
       },
+      "watchdog_getall": {
+        "name": "Watchdog : seuil getAll (s)"
+      },
+      "watchdog_power": {
+        "name": "Watchdog : seuil commande (s)"
+      },
+      "watchdog_ble": {
+        "name": "Watchdog : seuil toggle BLE (s)"
+      },
+      "watchdog_alert": {
+        "name": "Watchdog : seuil alerte plantage (s)"
+      },
       "min_soc": {
         "name": "SOC minimum"
       },
       "soc_set": {
         "name": "SOC maximum"
+      },
+      "fondation_db_on": {
+        "name": "Fondation : seuil d'engagement"
+      },
+      "fondation_db_off": {
+        "name": "Fondation : seuil de coupure"
+      },
+      "fondation_fast_track": {
+        "name": "Fondation : seuil fast-track"
+      },
+      "fondation_hl_alpha": {
+        "name": "Fondation : lissage house load (alpha %)"
+      },
+      "fondation_pv_alpha": {
+        "name": "Fondation : lissage solaire (alpha %)"
+      },
+      "fondation_step": {
+        "name": "Fondation : pas de l'intégrateur"
+      },
+      "fondation_hyst_device": {
+        "name": "Fondation : hystérésis device"
+      },
+      "fondation_overhead": {
+        "name": "Fondation : overhead onduleur"
+      },
+      "fondation_surplus_on": {
+        "name": "Fondation : seuil routage surplus (engagement)"
+      },
+      "fondation_surplus_off": {
+        "name": "Fondation : seuil routage surplus (coupure)"
+      },
+      "fondation_dwell_invert": {
+        "name": "Fondation : dwell d’inversion (cycles)"
+      },
+      "fondation_slew": {
+        "name": "Fondation : slew-rate consigne (W/cycle, 0=off)"
+      },
+      "fondation_heartbeat": {
+        "name": "Fondation : battement régulation (s, 0=off)"
       }
     },
     "sensor": {
@@ -215,6 +272,26 @@
           "2": "En décharge",
           "3": "Éteint"
         }
+      },
+      "fondation_state": {
+        "name": "Fondation : régime",
+        "state": {
+          "0": "En veille",
+          "1": "En charge",
+          "2": "En décharge"
+        }
+      },
+      "fondation_house_load": {
+        "name": "Fondation : house load"
+      },
+      "fondation_forced": {
+        "name": "Fondation : déversement forcé (plein)"
+      },
+      "fondation_integral": {
+        "name": "Fondation : intégrateur"
+      },
+      "fondation_setpoint": {
+        "name": "Fondation : setpoint"
       },
       "state": {
         "name": "État",
@@ -332,6 +409,30 @@
       },
       "delta_voltage": {
         "name": "Delta tension"
+      },
+      "cmd_target": {
+        "name": "Consigne moteur (cmd_target)"
+      },
+      "mqtt_silence": {
+        "name": "Silence MQTT anormal (s)"
+      },
+      "mqtt_last_wake": {
+        "name": "Dernier réveil MQTT"
+      },
+      "mqtt_broker": {
+        "name": "Broker MQTT actif"
+      },
+      "usable_soc": {
+        "name": "Réserve utilisable (%)"
+      },
+      "usable_kwh": {
+        "name": "Réserve utilisable (kWh)"
+      },
+      "usable_soc_parc": {
+        "name": "Parc — réserve utilisable (%)"
+      },
+      "usable_kwh_parc": {
+        "name": "Parc — réserve utilisable (kWh)"
       }
     },
     "select": {
@@ -404,7 +505,26 @@
           "smart": "Couplage intelligent",
           "smart_discharging": "Décharge intelligente",
           "smart_charging": "Charge intelligente",
-          "store_solar": "Stocker le solaire"
+          "store_solar": "Stocker le solaire",
+          "smart_fondation": "Régulation intelligente (fondation)"
+        }
+      },
+      "fondation_discharge_strategy": {
+        "name": "Fondation : stratégie décharge",
+        "state": {
+          "hysteresis": "Hystérésis (plus plein d'abord)",
+          "hysteresis_wide": "Hystérésis large (15 %)",
+          "fixed_order": "Ordre fixe (plus gros d'abord)",
+          "parallel": "Parallèle (prorata, expérimental)"
+        }
+      },
+      "fondation_charge_strategy": {
+        "name": "Fondation : stratégie charge",
+        "state": {
+          "hysteresis": "Hystérésis (plus vide d'abord)",
+          "hysteresis_wide": "Hystérésis large (15 %)",
+          "fixed_order": "Ordre fixe (sans PV d'abord)",
+          "parallel": "Parallèle (prorata, expérimental)"
         }
       },
       "pass_mode": {
@@ -455,6 +575,9 @@
       },
       "fanmode": {
         "name": "Ventilateur intelligent"
+      },
+      "simulation_log": {
+        "name": "Log simulation (à chaud)"
       }
     }
   },

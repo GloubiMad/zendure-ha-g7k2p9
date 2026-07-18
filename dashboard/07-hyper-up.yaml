@@ -1,0 +1,20 @@
+# === 07 - Hyper up (sans PV) ===
+# A coller en carte MANUELLE. Inchangee depuis le 30/06 : les entites etaient deja bonnes.
+# up n'a pas de panneaux : "Solaire" reste a zero, c'est normal.
+# ATTENTION au nommage Zendure (cf. 06) : outputPackPower = charge, packInputPower = decharge.
+# LECTURE : "Charge batterie" doit monter les jours de surplus (c'est glagla qui l'alimente
+# via le bus). Si up stagne alors que glagla encaisse -> baisser le seuil de routage.
+type: history-graph
+title: Hyper up (sans PV)
+hours_to_show: 2
+entities:
+  - entity: sensor.hyper_2000_up_grid_input_power
+    name: Charge depuis le bus
+  - entity: sensor.hyper_2000_up_output_home_power
+    name: Sortie maison (décharge)
+  - entity: sensor.hyper_2000_up_output_pack_power
+    name: Charge batterie
+  - entity: sensor.hyper_2000_up_pack_input_power
+    name: Décharge batterie
+  - entity: sensor.hyper_2000_up_cmd_target
+    name: Consigne moteur

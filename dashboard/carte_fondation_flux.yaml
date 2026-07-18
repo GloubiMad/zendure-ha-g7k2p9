@@ -1,0 +1,78 @@
+# === Fondation — flux d'énergie (Plotly) ===
+# Carte HACS dbuezas : type = custom:plotly-graph (PAS "-card").
+#
+# ⚠️ POUR L'AJOUTER/L'EDITER : dans l'editeur de carte, clique « Modifier en YAML ».
+#    L'editeur VISUEL de HA ne connait pas le schema d'une carte custom : il affiche une
+#    liste de cles « non prises en charge ». Ce n'est PAS une erreur, la carte fonctionne.
+#
+# CE QU'IL FAUT Y VOIR :
+#  - « P1 réseau » doit rester collé à zéro (positif = on achète, négatif = on exporte).
+#  - « glagla encaisse » doit rester proche de ZÉRO tant que up a de la place et que le
+#    surplus dépasse 300 W. Si cette courbe descend, glagla se remplit elle-même au lieu
+#    d'envoyer son surplus vers up -> baisser « seuil routage surplus (engagement) ».
+#  - « up charge » doit monter dès que glagla a du surplus solaire.
+#
+# LARGEUR DE LA CARTE : elle depend du type de VUE, pas de la carte.
+#  - vue « Sections »  : le bloc grid_options ci-dessous la met en pleine largeur.
+#  - vue « Panneau (1 carte) » : pleine largeur d'office (le mieux pour un graphe d'analyse).
+#  - vue « Masonry » (classique) : Modifier la vue -> Colonnes -> 1.
+type: custom:plotly-graph
+title: Fondation — flux d'énergie
+hours_to_show: 12
+refresh_interval: 30
+grid_options:
+  columns: full
+layout:
+  height: 460
+  margin: { l: 62, r: 20, t: 80, b: 40 }
+  hovermode: x unified
+  legend:
+    orientation: h
+    yanchor: bottom
+    y: 1.03
+    xanchor: left
+    x: 0
+    font: { size: 11 }
+  yaxis:
+    title: W
+    zeroline: true
+    zerolinewidth: 2
+    zerolinecolor: "#666"
+    gridcolor: "#eee"
+  xaxis:
+    gridcolor: "#eee"
+entities:
+  # --- Le résultat : ces deux courbes doivent rester plates ---
+  - entity: sensor.shellypro3em_9454c5b8aaf0_phase_c_active_power
+    name: P1 réseau (doit rester ~0)
+    line: { width: 3, color: "#e74c3c" }
+
+  - entity: sensor.hyper_2000_glagla_output_pack_power
+    name: glagla encaisse (doit rester ~0)
+    filters:
+      - multiply: -1
+    line: { width: 2.5, color: "#c0392b", dash: dash }
+
+  # --- Le contexte ---
+  - entity: sensor.zendure_manager_fondation_house_load
+    name: Demande maison
+    line: { width: 1.5, color: "#34495e", dash: dot }
+
+  - entity: sensor.hyper_2000_glagla_solar_input_power
+    name: glagla solaire
+    line: { width: 2, color: "#f1c40f" }
+
+  - entity: sensor.hyper_2000_glagla_output_home_power
+    name: glagla → maison
+    line: { width: 2, color: "#e67e22" }
+
+  # --- up : charge en positif (vert), décharge en négatif (bleu) ---
+  - entity: sensor.hyper_2000_up_grid_input_power
+    name: up charge
+    line: { width: 2.5, color: "#27ae60" }
+
+  - entity: sensor.hyper_2000_up_output_home_power
+    name: up décharge
+    filters:
+      - multiply: -1
+    line: { width: 2, color: "#2980b9" }

@@ -1,0 +1,31 @@
+# === 10 - Fondation : observation ===
+# A coller en carte MANUELLE. Carte HA native (l'editeur visuel fonctionne).
+# Le tableau de bord a regarder AVANT de toucher a un reglage.
+type: entities
+title: Fondation — observation
+show_header_toggle: false
+state_color: true
+entities:
+  - entity: select.zendure_manager_operation
+    name: Mode (moteur fondation = « smart_fondation »)
+    secondary_info: last-changed
+  - entity: sensor.zendure_manager_fondation_state
+    name: Régime
+  - type: divider
+  - entity: sensor.zendure_manager_fondation_house_load
+    name: Demande maison (house load)
+  - entity: sensor.zendure_manager_fondation_setpoint
+    name: Consigne totale (setpoint)
+  - entity: sensor.zendure_manager_fondation_integral
+    name: Intégrateur (doit rester ~0)
+  - entity: sensor.zendure_manager_fondation_forced
+    name: Déversement forcé (onduleur plein)
+  - type: divider
+  - entity: sensor.hyper_2000_glagla_electric_level
+    name: glagla — SoC
+  - entity: sensor.hyper_2000_up_electric_level
+    name: up — SoC
+  - entity: sensor.hyper_2000_glagla_output_pack_power
+    name: glagla — encaisse (doit rester ~0)
+  - entity: sensor.hyper_2000_up_grid_input_power
+    name: up — charge en cours

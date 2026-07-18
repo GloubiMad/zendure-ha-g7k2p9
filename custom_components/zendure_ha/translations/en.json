@@ -66,6 +66,9 @@
     "button": {
       "mqtt_reset": {
         "name": "Reset connection"
+      },
+      "simulation_rotate": {
+        "name": "Rotate simulation log"
       }
     },
     "binary_sensor": {
@@ -112,6 +115,39 @@
       },
       "soc_set": {
         "name": "Target SoC"
+      },
+      "fondation_db_on": {
+        "name": "Fondation: engage threshold"
+      },
+      "fondation_db_off": {
+        "name": "Fondation: release threshold"
+      },
+      "fondation_fast_track": {
+        "name": "Fondation: fast-track threshold"
+      },
+      "fondation_hl_alpha": {
+        "name": "Fondation: house load smoothing (alpha %)"
+      },
+      "fondation_pv_alpha": {
+        "name": "Fondation: solar smoothing (alpha %)"
+      },
+      "fondation_step": {
+        "name": "Fondation: integrator step"
+      },
+      "fondation_hyst_device": {
+        "name": "Fondation: device hysteresis"
+      },
+      "fondation_overhead": {
+        "name": "Fondation: inverter overhead"
+      },
+      "fondation_surplus_on": {
+        "name": "Fondation: surplus routing threshold (engage)"
+      },
+      "fondation_surplus_off": {
+        "name": "Fondation: surplus routing threshold (release)"
+      },
+      "fondation_dwell_invert": {
+        "name": "Fondation: reversal dwell (cycles)"
       }
     },
     "sensor": {
@@ -249,6 +285,26 @@
           "3": "Off"
         }
       },
+      "fondation_state": {
+        "name": "Fondation: regime",
+        "state": {
+          "0": "Idle",
+          "1": "Charging",
+          "2": "Discharging"
+        }
+      },
+      "fondation_house_load": {
+        "name": "Fondation: house load"
+      },
+      "fondation_forced": {
+        "name": "Fondation: forced solar dump (full)"
+      },
+      "fondation_integral": {
+        "name": "Fondation: integrator"
+      },
+      "fondation_setpoint": {
+        "name": "Fondation: setpoint"
+      },
       "state": {
         "name": "State",
         "state": {
@@ -371,6 +427,21 @@
       },
       "delta_voltage": {
         "name": "Delta Voltage"
+      },
+      "cmd_target": {
+        "name": "Engine command (cmd_target)"
+      },
+      "usable_soc": {
+        "name": "Usable reserve (%)"
+      },
+      "usable_kwh": {
+        "name": "Usable reserve (kWh)"
+      },
+      "usable_soc_parc": {
+        "name": "Fleet — usable reserve (%)"
+      },
+      "usable_kwh_parc": {
+        "name": "Fleet — usable reserve (kWh)"
       }
     },
     "select": {
@@ -443,7 +514,26 @@
           "smart": "Smart Matching",
           "smart_discharging": "Smart discharge only",
           "smart_charging": "Smart charge only",
-          "store_solar": "Store Solar"
+          "store_solar": "Store Solar",
+          "smart_fondation": "Smart Matching (fondation)"
+        }
+      },
+      "fondation_discharge_strategy": {
+        "name": "Fondation: discharge strategy",
+        "state": {
+          "hysteresis": "Hysteresis (fullest first)",
+          "hysteresis_wide": "Wide hysteresis (15%)",
+          "fixed_order": "Fixed order (largest first)",
+          "parallel": "Parallel (prorated, experimental)"
+        }
+      },
+      "fondation_charge_strategy": {
+        "name": "Fondation: charge strategy",
+        "state": {
+          "hysteresis": "Hysteresis (emptiest first)",
+          "hysteresis_wide": "Wide hysteresis (15%)",
+          "fixed_order": "Fixed order (no-PV first)",
+          "parallel": "Parallel (prorated, experimental)"
         }
       },
       "pass_mode": {
@@ -505,6 +595,9 @@
       },
       "fanmode": {
         "name": "Smart Fan"
+      },
+      "simulation_log": {
+        "name": "Simulation log (live)"
       }
     }
   },

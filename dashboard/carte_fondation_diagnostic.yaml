@@ -1,0 +1,75 @@
+# === Fondation — diagnostic (Plotly) ===
+# Carte HACS dbuezas : type = custom:plotly-graph (PAS "-card").
+#
+# ⚠️ POUR L'AJOUTER/L'EDITER : clique « Modifier en YAML » dans l'editeur de carte.
+#    L'editeur VISUEL de HA ne sait pas afficher une carte custom -> il liste des cles
+#    « non prises en charge ». Ce n'est PAS une erreur, la carte fonctionne.
+#
+# Le REGIME a ete sorti de cette carte (il ecrasait l'echelle) : voir 09-fondation-regime.yaml.
+#
+# CE QU'IL FAUT Y VOIR :
+#  - « Intégrateur » doit rester proche de ZERO. S'il monte a plusieurs centaines et y reste,
+#    les deux Hyper sont SATURES (conso > 2400 W) : c'est normal, l'anti-windup l'empeche de
+#    s'emballer. S'il oscille fort -> baisser le « pas de l'intégrateur ».
+#  - « Déversement forcé » non nul = glagla est PLEINE et pousse son solaire malgre tout.
+#  - « SoC up » (axe de droite) doit monter les jours de surplus. S'il stagne alors que
+#    glagla encaisse -> baisser le « seuil routage surplus (engagement) ».
+#
+# LARGEUR DE LA CARTE : elle depend du type de VUE, pas de la carte.
+#  - vue « Sections »  : le bloc grid_options ci-dessous la met en pleine largeur.
+#  - vue « Panneau (1 carte) » : pleine largeur d'office (le mieux pour un graphe d'analyse).
+#  - vue « Masonry » (classique) : Modifier la vue -> Colonnes -> 1.
+# (grid_options est ignore par les vues qui ne le gerent pas : on peut le laisser.)
+type: custom:plotly-graph
+title: Fondation — diagnostic
+hours_to_show: 24
+refresh_interval: 60
+grid_options:
+  columns: full
+layout:
+  height: 440
+  margin: { l: 62, r: 55, t: 80, b: 40 }
+  hovermode: x unified
+  legend:
+    orientation: h
+    yanchor: bottom
+    y: 1.03
+    xanchor: left
+    x: 0
+    font: { size: 11 }
+  yaxis:
+    title: W
+    zeroline: true
+    zerolinewidth: 2
+    zerolinecolor: "#666"
+    gridcolor: "#eee"
+  yaxis2:
+    title: SoC (%)
+    overlaying: y
+    side: right
+    range: [0, 100]
+    showgrid: false
+  xaxis:
+    gridcolor: "#eee"
+entities:
+  - entity: sensor.zendure_manager_fondation_integral
+    name: Intégrateur (doit rester ~0)
+    line: { width: 3, color: "#8e44ad" }
+
+  - entity: sensor.zendure_manager_fondation_setpoint
+    name: Consigne totale
+    line: { width: 1.5, color: "#16a085" }
+
+  - entity: sensor.zendure_manager_fondation_forced
+    name: Déversement forcé (onduleur plein)
+    line: { width: 2, color: "#c0392b", dash: dash }
+
+  - entity: sensor.hyper_2000_up_electric_level
+    name: SoC up
+    "yaxis": y2
+    line: { width: 2.5, color: "#27ae60", dash: dot }
+
+  - entity: sensor.hyper_2000_glagla_electric_level
+    name: SoC glagla
+    "yaxis": y2
+    line: { width: 2.5, color: "#f39c12", dash: dot }

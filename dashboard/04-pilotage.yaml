@@ -1,0 +1,20 @@
+# === 04 - Pilotage ===
+# A coller en carte MANUELLE. (remplace l'ancienne 04-aansturing-pilotage.yaml)
+# MAJ 1.4.2 : "setpoint" et "usable_energy" etaient des entites du fork 1.3.1.x.
+# Le moteur fondation s'active en choisissant « smart_fondation » dans le select ci-dessous.
+type: entities
+title: Pilotage
+state_color: true
+entities:
+  - entity: select.zendure_manager_operation
+    name: Mode (moteur fondation = « smart_fondation »)
+  - entity: sensor.zendure_manager_fondation_state
+    name: Régime (repos / charge / décharge)
+  - entity: sensor.zendure_manager_fondation_house_load
+    name: Demande maison (house load)
+  - entity: sensor.zendure_manager_fondation_setpoint
+    name: Consigne moteur (setpoint)
+  - entity: sensor.zendure_manager_power
+    name: Réalisé parc
+  - entity: sensor.zendure_manager_available_kwh
+    name: Énergie dispo (kWh)

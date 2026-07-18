@@ -1,0 +1,30 @@
+# === 12 - Réglages : stabilité (calmer le bruit) ===
+# A coller en carte MANUELLE. Voir PARAMETRES_FONDATION.md.
+#
+# QUAND Y TOUCHER :
+#  - le regime saute sans arret (carte 09)      -> « lissage house load » 40 -> 25 %
+#  - les deux batteries se relaient souvent     -> « hystérésis device » 5 -> 10 %
+#  - export sur un appareil qui pulse (micro-ondes, resistance) -> « dwell d'inversion » 3 -> 6
+#  - charge soutenue (cumulus, VE)              -> « dwell d'inversion » 3 -> 1
+#  - overshoot d'export sur transitoire (up qui inverse trop fort) -> baisser « slew-rate » (ex. 300)
+#  - export residuel qui traine ~15 s (P1 fige) -> « battement » corrige (0 = revenir au pur event-driven)
+type: entities
+title: Réglages — stabilité
+show_header_toggle: false
+entities:
+  - entity: number.zendure_manager_fondation_hl_alpha
+    name: Lissage house load (défaut 40 % — baisser = plus lisse)
+  - entity: number.zendure_manager_fondation_pv_alpha
+    name: Lissage solaire (défaut 20 %)
+  - entity: number.zendure_manager_fondation_dwell_invert
+    name: Dwell d'inversion (défaut 3 cycles ≈ 15 s)
+  - entity: number.zendure_manager_fondation_hyst_device
+    name: Hystérésis device (défaut 5 %)
+  - entity: number.zendure_manager_fondation_slew
+    name: Slew-rate consigne (défaut 500 W/cycle — baisser = plus doux, 0 = off)
+  - entity: number.zendure_manager_fondation_heartbeat
+    name: Battement régulation (défaut 3 s — corrige les états figés, 0 = off)
+footer:
+  type: graph
+  entity: sensor.zendure_manager_fondation_state
+  hours_to_show: 12
