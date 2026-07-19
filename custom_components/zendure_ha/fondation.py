@@ -54,6 +54,7 @@ class FondationEngine:
         self.regime: ManagerState = ManagerState.IDLE
         self.integral = 0.0
         self.hl_ema: float | None = None       # EMA de house_load (décision de régime)
+        self.amt_ema: float | None = None      # EMA de house_load (montants des consignes)
         self.pv_ema: dict[str, float] = {}     # EMA du PV par device (distribution)
         self.lead: dict[str, bool] = {}        # hystérésis sticky par device (décharge batterie)
         self.clead: dict[str, bool] = {}       # hystérésis sticky par device (charge)
@@ -79,6 +80,12 @@ class FondationEngine:
         self.db_off = FondationNumber(m, "fondation_db_off", 30, 10, 100, "W")
         self.fast_track = FondationNumber(m, "fondation_fast_track", 200, 100, 1000, "W")
         self.hl_alpha = FondationNumber(m, "fondation_hl_alpha", 40, 5, 100, "%")
+        # Lissage des MONTANTS (pas seulement du régime). 100 = brut = comportement historique,
+        # donc NEUTRE à l'installation. Mesuré 19/07 sur 231 min : 74 % du mouvement de consigne du
+        # SolarFlow est de l'aller-retour, et 98 % des échelons >200 W sont annulés par le moteur
+        # avant que l'actuateur (2-6 s, mesuré) ait pu les suivre. À 25 %, l'écart-type des variations
+        # tombe de 130 W à 35 W pour ~6 s de retard. Le fast-track court-circuite ce filtre.
+        self.amt_alpha = FondationNumber(m, "fondation_amt_alpha", 100, 5, 100, "%")
         self.pv_alpha = FondationNumber(m, "fondation_pv_alpha", 20, 5, 100, "%")
         self.step = FondationNumber(m, "fondation_step", 120, 20, 300, "W")
         self.hyst_device = FondationNumber(m, "fondation_hyst_device", 5, 1, 20, "%")
@@ -198,6 +205,18 @@ class FondationEngine:
         db_off = self.db_off.asNumber
         ft = self.fast_track.asNumber
 
+        # --- lissage des MONTANTS, avec BYPASS fast-track ---
+        # Le régime décide sur hl_ema, les montants sur t_amt. Au-delà de ±ft (vrai gros saut
+        # d'énergie), on recale le filtre sur le brut et on l'utilise tel quel : un gros saut passe
+        # INTACT et immédiatement, seul le bruit est filtré. C'est la différence avec le slew-rate,
+        # qui lui écrête aussi les vrais sauts.
+        a_amt = max(0.05, min(1.0, self.amt_alpha.asNumber / 100.0))
+        if a_amt >= 1.0 or abs(t_raw) > ft:
+            self.amt_ema = t_raw
+        else:
+            self.amt_ema = t_raw if self.amt_ema is None else a_amt * t_raw + (1.0 - a_amt) * self.amt_ema
+        t_amt = self.amt_ema
+
         # --- machine à états avec hystérésis + fast-track (brut au-delà de ±ft => immédiat) ---
         match self.regime:
             case ManagerState.IDLE:
@@ -234,7 +253,7 @@ class FondationEngine:
         elif p1 > db_off:
             self.integral = max(0.0, self.integral - max(step, min(p1, 2 * step)))
 
-        # --- consignes (sur la demande CONTRÔLABLE t_raw, pas house_load) ---
+        # --- consignes (sur la demande CONTRÔLABLE t_amt, pas house_load) ---
         cmd: dict[ZendureDevice, float] = dict.fromkeys(devices, 0.0)
         # IDLE passe aussi par ici : house_load ≈ 0 ne signifie PAS « pas de surplus solaire », mais
         # « bus équilibré » — typiquement parce que les APsystems couvrent la maison ET que le producteur
@@ -242,7 +261,7 @@ class FondationEngine:
         # 975 W et up ne recevait rien (et le régime flappait sur le bruit P1). En IDLE l'intégrale est
         # nulle et demand ≈ 0 : l'étape 1) ne prend rien, seule l'étape 1bis route le surplus.
         if self.regime in (ManagerState.DISCHARGE, ManagerState.IDLE):
-            demand = max(0.0, t_raw) + self.integral
+            demand = max(0.0, t_amt) + self.integral
             # 1) le PV des producteurs NON pleins d'abord (gratuit, ne vide pas les batteries).
             #    Les SOCFULL sont exclus : leur PV est déjà déversé de force (compté dans forced),
             #    le re-commander ici le compterait deux fois.
@@ -373,7 +392,7 @@ class FondationEngine:
                 self.lead[d.deviceId] = (cmd[d] - ns) > 5
                 self.clead[d.deviceId] = False
         elif self.regime == ManagerState.CHARGE:
-            rem = max(0.0, -t_raw) + self.integral
+            rem = max(0.0, -t_amt) + self.integral
             # SOCFULL exclu (c'est LUI qui déverse le surplus qu'on absorbe) ;
             # bypass actif exclu (sa production n'est pas dispatchable).
             cand = [d for d in devices if d.state != DeviceState.SOCFULL and d.byPass.asInt == 0]
@@ -514,7 +533,8 @@ class FondationEngine:
         self.manager.setpoint = setpoint
         self.debug = (
             f"fondation regime={self.regime.name} hl={int(hl_raw)} forced={int(forced)} T={int(t_raw)}"
-            f" ema={int(t_reg)} int={int(self.integral)} sp={setpoint}"
+            f" ema={int(t_reg)} amt={int(self.amt_ema) if self.amt_ema is not None else 0}"
+            f" int={int(self.integral)} sp={setpoint}"
             f" strat={self.discharge_strategy.value}/{self.charge_strategy.value}"
         )
         _LOGGER.info(
