@@ -18,6 +18,7 @@ pour pouvoir les faire varier selon la journée et automatiser leur réglage plu
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 
 from homeassistant.components.number import NumberMode
 
@@ -152,6 +153,11 @@ class FondationEngine:
         devices: list[ZendureDevice] = [d for d in self.manager.devices if d.state != DeviceState.OFFLINE and getattr(d, "fuseGrp", None) is not None]
         if not devices:
             return
+
+        # --- diagnostic : AVANT de recalculer, on confronte la mesure courante à la consigne
+        # encore en vigueur. Ne corrige rien, se contente de nommer un device qui n'obéit pas.
+        if (diag := getattr(self.manager, "diag", None)) is not None:
+            diag.update(devices, p1, datetime.now())
 
         # --- house_load mesuré (invariant) ---
         house_net = sum(d.homeOutput.asInt - d.homeInput.asInt for d in devices)

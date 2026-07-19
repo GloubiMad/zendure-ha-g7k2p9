@@ -36,6 +36,7 @@ from .const import (
 )
 from .device import DeviceSettings, ZendureDevice, ZendureLegacy
 from .entity import EntityDevice
+from .diagnostic import EngineDiagnostic
 from .fondation import FondationEngine
 from .reserve import UsableReserve
 from .simulation import SimulationLog
@@ -98,6 +99,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.watchdog = MqttWatchdog(self)
         self.reserve = UsableReserve(self)
         self.sim = SimulationLog(self)
+        self.diag = EngineDiagnostic(self)
         self.setpoint = 0  # dernier setpoint du moteur actif (observabilité simulation.csv)
 
     async def loadDevices(self) -> None:
@@ -132,6 +134,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.reserve.createManagerEntities()
 
         self.watchdog.createManagerEntities()
+        self.diag.createManagerEntities()
 
         # load devices
         for dev in data["deviceList"]:
@@ -183,6 +186,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.watchdog.createDeviceEntities()
         self.reserve.createDeviceEntities()
         self.fondation.createDeviceEntities()
+        self.diag.createDeviceEntities()
 
         # initialize the api & p1 meter
         self.api.Init(self.config_entry.data, mqtt)
