@@ -73,6 +73,24 @@ class FondationEngine:
         # sera câblé plus tard (#1 = nommer les modes). Défaut STORE (le cas utile, validé).
         self._socfull_block = False
 
+    def _bypass_blocks(self, d: ZendureDevice) -> bool:
+        """Le bypass disqualifie de l'ABSORPTION les seuls PRODUCTEURS.
+
+        En bypass le firmware arbitre lui-même son PV : sa sortie n'est pas pilotable, donc on
+        ne peut pas compter dessus pour distribuer. Mais un device SANS PV n'a rien à arbitrer —
+        l'écarter revient à jeter sa capacité de stockage.
+
+        Mesuré le 19/07 : `up` est en bypass sur 51375/51375 lignes avec PV = 0 W. Il est donc
+        resté à 0 W, 57 % de place libre (≈4,5 kWh) et 1200 W de capacité, pendant que 446 W
+        partaient au réseau en moyenne — le SolarFlow étant saturé à 96 % de SoC (tapering) et
+        glagla continuant de produire. Il accepte pourtant une consigne de charge en bypass
+        (92 observations, suivi 74 %, l'écart s'expliquant par la rampe de démarrage).
+
+        NB : là où ce test cohabite avec `pv_ema <= 0` (sinks), la garantie « pas de production
+        non pilotable » était déjà assurée ; le test bypass n'y retirait qu'un puits valide.
+        """
+        return d.byPass.asInt > 0 and self.pv_ema.get(d.deviceId, 0.0) > 0
+
     def createEntities(self) -> None:
         """Paramètres à chaud + capteurs d'observabilité, sur le device Manager."""
         m = self.manager
@@ -292,7 +310,7 @@ class FondationEngine:
                     sinks = [
                         d
                         for d in devices
-                        if (self.pv_ema[d.deviceId] - ovh) <= 0 and d.state != DeviceState.SOCFULL and d.byPass.asInt == 0 and d.electricLevel.asInt < 100
+                        if (self.pv_ema[d.deviceId] - ovh) <= 0 and d.state != DeviceState.SOCFULL and not self._bypass_blocks(d) and d.electricLevel.asInt < 100
                     ]
                     if self.charge_strategy.value == 2:  # fixed_order : le plus gros d'abord
                         sinks.sort(key=lambda d: -d.kWh)
@@ -394,8 +412,9 @@ class FondationEngine:
         elif self.regime == ManagerState.CHARGE:
             rem = max(0.0, -t_amt) + self.integral
             # SOCFULL exclu (c'est LUI qui déverse le surplus qu'on absorbe) ;
-            # bypass actif exclu (sa production n'est pas dispatchable).
-            cand = [d for d in devices if d.state != DeviceState.SOCFULL and d.byPass.asInt == 0]
+            # bypass exclu SEULEMENT s'il produit (cf. _bypass_blocks) : un device sans PV
+            # en bypass reste un puits parfaitement valide.
+            cand = [d for d in devices if d.state != DeviceState.SOCFULL and not self._bypass_blocks(d)]
             fuse_used = {}
 
             def chg_cap(d: ZendureDevice) -> float:
@@ -567,7 +586,7 @@ class FondationEngine:
         if surplus > 0:
             # STORE : stocker le surplus dans les batteries non-pleines (charge_strategy), écrêter le reste
             self.regime = ManagerState.CHARGE
-            sinks = [d for d in devices if d.state != DeviceState.SOCFULL and d.byPass.asInt == 0 and d.electricLevel.asInt < 100]
+            sinks = [d for d in devices if d.state != DeviceState.SOCFULL and not self._bypass_blocks(d) and d.electricLevel.asInt < 100]
             if self.charge_strategy.value == 2:  # fixed_order : sans-PV d'abord, puis le plus gros
                 sinks.sort(key=lambda d: (self.pv_ema.get(d.deviceId, 0.0) > 25.0, -d.kWh))
             else:                                 # sans-PV d'abord, puis plus-vide
