@@ -31,6 +31,13 @@ from .sensor import ZendureSensor
 
 _LOGGER = logging.getLogger(__name__)
 
+# Un device reste considéré comme « producteur » ce délai après sa dernière production réelle.
+# Assez long pour survivre à un passage nuageux ou à une période où on lui commande 0 (ce qui
+# écrête ses panneaux et ferait disparaître la preuve), assez court pour qu'un onduleur dont on
+# débranche les panneaux finisse par sortir de la catégorie.
+PV_MEMORY = 1800.0  # s
+PV_SEEN_MIN = 50.0  # W — au-dessus, on considère qu'il produit vraiment
+
 
 class FondationNumber(ZendureRestoreNumber):
     """Number restaurable AVEC valeur par défaut (le parent restaure 0 quand rien n'a jamais été stocké)."""
@@ -56,6 +63,9 @@ class FondationEngine:
         self.integral = 0.0
         self.hl_ema: float | None = None       # EMA de house_load (décision de régime)
         self.amt_ema: float | None = None      # EMA de house_load (montants des consignes)
+        self.pv_seen: dict[str, datetime] = {}   # dernier instant où ce device a VRAIMENT produit
+        self.drain_ema: dict[str, float] = {}    # EMA du soutirage batterie par device (+ = se vide)
+        self.engage_active = False               # hystérésis du seuil d'engagement en décharge
         self.pv_ema: dict[str, float] = {}     # EMA du PV par device (distribution)
         self.lead: dict[str, bool] = {}        # hystérésis sticky par device (décharge batterie)
         self.clead: dict[str, bool] = {}       # hystérésis sticky par device (charge)
@@ -73,6 +83,17 @@ class FondationEngine:
         # le reste) ; True=BLOCK (rien ne sort, maison sur réseau). Le mapping vers un mode gridReverse
         # sera câblé plus tard (#1 = nommer les modes). Défaut STORE (le cas utile, validé).
         self._socfull_block = False
+
+    def _is_producer(self, d: ZendureDevice, now: datetime) -> bool:
+        """Ce device a-t-il des panneaux ? Détection ROBUSTE, indépendante de la consigne courante.
+
+        On ne peut pas répondre avec `solarInput` à l'instant t : un device sans débouché écrête ses
+        panneaux, donc la mesure tombe à presque rien précisément quand on lui commande 0. On mémorise
+        donc le dernier moment où il a RÉELLEMENT produit, et on considère qu'il reste un producteur
+        pendant `PV_MEMORY`. Un onduleur sans PV ne franchira jamais le seuil et ne sera jamais
+        promu producteur, quelle que soit la durée.
+        """
+        return (now - self.pv_seen.get(d.deviceId, datetime.min)).total_seconds() < PV_MEMORY
 
     def _bypass_blocks(self, d: ZendureDevice) -> bool:
         """Le bypass disqualifie de l'ABSORPTION les seuls PRODUCTEURS.
@@ -112,6 +133,12 @@ class FondationEngine:
         # Routage du surplus solaire d'un producteur vers une batterie sans PV : ça coûte 2 conversions
         # (producteur DC->AC, bus, batterie AC->DC). Sous le seuil d'engagement, on laisse le producteur
         # encaisser lui-même (1 conversion, plus efficace). Hystérésis on/off pour ne pas faire flip-flap.
+        # Seuil d'ENGAGEMENT en décharge, symétrique de `surplus_on` côté charge. Un onduleur sans PV
+        # consomme ~50 W pour fonctionner : le réveiller pour sortir 50 W est une perte nette. Sert
+        # aussi de bascule producteur -> stratégie : tant qu'un producteur soutire moins que ce seuil
+        # de SA batterie, on le préfère (son solaire est gratuit) ; au-delà, il n'a plus rien de
+        # gratuit à offrir et on repasse par la stratégie de décharge normale. 0 = désactivé.
+        self.min_engage = FondationNumber(m, "fondation_min_engage", 300, 0, 1000, "W")
         self.surplus_on = FondationNumber(m, "fondation_surplus_on", 300, 50, 1500, "W")
         self.surplus_off = FondationNumber(m, "fondation_surplus_off", 150, 20, 1200, "W")
         # Dwell d'INVERSION (nb de cycles) : une batterie ne passe pas charge<->décharge sur un
@@ -154,10 +181,12 @@ class FondationEngine:
         if not devices:
             return
 
+        now = datetime.now()
+
         # --- diagnostic : AVANT de recalculer, on confronte la mesure courante à la consigne
         # encore en vigueur. Ne corrige rien, se contente de nommer un device qui n'obéit pas.
         if (diag := getattr(self.manager, "diag", None)) is not None:
-            diag.update(devices, p1, datetime.now())
+            diag.update(devices, p1, now)
 
         # --- house_load mesuré (invariant) ---
         house_net = sum(d.homeOutput.asInt - d.homeInput.asInt for d in devices)
@@ -175,6 +204,15 @@ class FondationEngine:
             solar = float(d.solarInput.asInt)
             prev = self.pv_ema.get(d.deviceId)
             self.pv_ema[d.deviceId] = solar if prev is None else palpha * solar + (1.0 - palpha) * prev
+            # Mémoire « ce device a des panneaux » : une production réelle fait foi durablement,
+            # car l'absence de production ne prouve rien (elle peut venir de notre propre consigne).
+            if solar > PV_SEEN_MIN:
+                self.pv_seen[d.deviceId] = now
+            # Soutirage batterie (+ = se vide). Seule mesure NON suppressible par la consigne, donc
+            # le seul critère fiable pour savoir si un producteur donne du gratuit ou puise sa réserve.
+            drain = float(d.batteryOutput.asInt - d.batteryInput.asInt)
+            dprev = self.drain_ema.get(d.deviceId)
+            self.drain_ema[d.deviceId] = drain if dprev is None else palpha * drain + (1.0 - palpha) * dprev
 
         cmd: dict[ZendureDevice, float] = dict.fromkeys(devices, 0.0)
 
@@ -286,16 +324,35 @@ class FondationEngine:
         # nulle et demand ≈ 0 : l'étape 1) ne prend rien, seule l'étape 1bis route le surplus.
         if self.regime in (ManagerState.DISCHARGE, ManagerState.IDLE):
             demand = max(0.0, t_amt) + self.integral
-            # 1) le PV des producteurs NON pleins d'abord (gratuit, ne vide pas les batteries).
-            #    Les SOCFULL sont exclus : leur PV est déjà déversé de force (compté dans forced),
-            #    le re-commander ici le compterait deux fois.
+            # 1) LES PRODUCTEURS D'ABORD — on leur demande CE DONT LA MAISON A BESOIN.
+            #
+            # ⚠️ On ne dimensionne PLUS sur `pv_ema`. `solarInput` ment : un device sans débouché
+            # ÉCRÊTE SES PROPRES PANNEAUX. Mesuré le 20/07 sur glagla, même soleil, même appareil :
+            # 773 W de PV en gridReverse « autorisé », 152 W en « interdit ». La mesure est donc
+            # écrasée par la commande qui s'en servait — le moteur commandait 0, la production
+            # s'effondrait, il en déduisait qu'il n'y avait rien à prendre, et il commandait 0.
+            # Boucle qui se mord la queue, et du solaire gratuit jeté pendant qu'on vidait une
+            # batterie pour compenser.
+            #
+            # On demande donc au producteur ce dont on a besoin et c'EST LUI qui arbitre : il sort
+            # son solaire, et complète avec sa batterie s'il n'a pas assez. Le flux batterie, lui,
+            # n'est PAS suppressible par la consigne — c'est la seule mesure fiable ici. Tant qu'il
+            # soutire moins que `min_engage`, son apport reste majoritairement gratuit et on le
+            # préfère ; au-delà, il n'a plus d'avantage sur les autres et on rend la main à l'étape 2.
+            #
+            # Les SOCFULL participent désormais : les exclure était valable tant que le firmware
+            # déversait tout seul (garde-fou du `continue` supprimé en 1.4.3.5), plus maintenant.
+            me = self.min_engage.asNumber
+            fuse_p1: dict[object, float] = {}  # budget fusegroup consommé dès l'étape 1
             for d in devices:
-                if d.state == DeviceState.SOCFULL:
+                dr = self.drain_ema.get(d.deviceId, 0.0)
+                if not self._is_producer(d, now) or (me > 0 and dr > me):
                     continue
-                ns = max(0.0, self.pv_ema[d.deviceId] - ovh)
-                take = min(demand, ns)
+                used = fuse_p1.get(d.fuseGrp, 0.0)
+                take = max(0.0, min(demand, float(d.discharge_limit), float(d.fuseGrp.maxpower) - used))
                 cmd[d] = take
                 demand -= take
+                fuse_p1[d.fuseGrp] = used + take
 
             # 1bis) SURPLUS SOLAIRE -> le stocker dans les batteries SANS PV (« sans-PV d'abord »).
             # Sinon le firmware du producteur encaisse l'excédent dans SA propre batterie (observé :
@@ -363,8 +420,17 @@ class FondationEngine:
             #    au plancher : vidé -> exclu -> remonte d'un poil -> reprend tout -> re-vidé).
             #    SOCFULL participe : s'il ne livre que son solaire (firmware), l'intégrateur P1
             #    reporte le déficit sur le suivant.
+            # SEUIL D'ENGAGEMENT : sous `min_engage`, ce qui reste à couvrir ne justifie pas de
+            # réveiller un onduleur SANS PV — il consomme ~50 W pour fonctionner, en sortir 50 W est
+            # une perte nette. Un producteur déjà engagé à l'étape 1 n'est pas concerné (il tourne
+            # déjà). Hystérésis via `engage_active` : une fois engagé on continue jusqu'à retomber
+            # sous la moitié du seuil, pour ne pas faire démarrer/arrêter en boucle autour.
+            engaged = demand >= (me / 2 if self.engage_active else me)
+            self.engage_active = engaged
             batt: list[ZendureDevice] = []
             for d in devices:
+                if me > 0 and not engaged and cmd[d] <= 0 and not self._is_producer(d, now):
+                    continue
                 if self.floor.get(d.deviceId):
                     if d.state != DeviceState.SOCEMPTY and d.electricLevel.asInt > d.minSoc.asNumber + 3:
                         self.floor[d.deviceId] = False
@@ -568,6 +634,7 @@ class FondationEngine:
             f"fondation regime={self.regime.name} hl={int(hl_raw)} forced={int(forced)} T={int(t_raw)}"
             f" ema={int(t_reg)} amt={int(self.amt_ema) if self.amt_ema is not None else 0}"
             f" int={int(self.integral)} sp={setpoint}"
+            f" prod={'/'.join(f'{int(self.drain_ema.get(d.deviceId, 0))}' for d in devices if self._is_producer(d, now)) or '-'}"
             f" strat={self.discharge_strategy.value}/{self.charge_strategy.value}"
         )
         _LOGGER.info(
