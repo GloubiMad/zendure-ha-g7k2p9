@@ -65,7 +65,6 @@ class FondationEngine:
         self.amt_ema: float | None = None      # EMA de house_load (montants des consignes)
         self.pv_seen: dict[str, datetime] = {}   # dernier instant où ce device a VRAIMENT produit
         self.drain_ema: dict[str, float] = {}    # EMA du soutirage batterie par device (+ = se vide)
-        self.engage_active = False               # hystérésis du seuil d'engagement en décharge
         self.pv_ema: dict[str, float] = {}     # EMA du PV par device (distribution)
         self.lead: dict[str, bool] = {}        # hystérésis sticky par device (décharge batterie)
         self.clead: dict[str, bool] = {}       # hystérésis sticky par device (charge)
@@ -94,6 +93,22 @@ class FondationEngine:
         promu producteur, quelle que soit la durée.
         """
         return (now - self.pv_seen.get(d.deviceId, datetime.min)).total_seconds() < PV_MEMORY
+
+    def _engage_ok(self, d: ZendureDevice, take: float, me: float, now: datetime) -> bool:
+        """Faut-il vraiment réveiller CE device pour CETTE part ?
+
+        Le seuil porte sur la part REÇUE PAR L'APPAREIL, pas sur le besoin total : mesuré le 20/07,
+        un besoin médian de 345 W (donc « engagé ») donnait au SolarFlow une part médiane de 86 W,
+        parfois 3 W — il démarrait pour rien 95 % du temps. Un onduleur consomme ~50 W pour
+        fonctionner : en sortir 86 W est une quasi-perte.
+
+        Un PRODUCTEUR n'est jamais soumis au seuil : son solaire est gratuit, quelle que soit la part.
+        Hystérésis : un appareil déjà démarré continue jusqu'à la moitié du seuil, pour ne pas
+        s'allumer et s'éteindre en boucle autour de la valeur.
+        """
+        if me <= 0 or take <= 0 or self._is_producer(d, now):
+            return True
+        return take >= (me / 2 if abs(self.cmd_applied.get(d.deviceId, 0)) > 0 else me)
 
     def _bypass_blocks(self, d: ZendureDevice) -> bool:
         """Le bypass disqualifie de l'ABSORPTION les seuls PRODUCTEURS.
@@ -420,17 +435,10 @@ class FondationEngine:
             #    au plancher : vidé -> exclu -> remonte d'un poil -> reprend tout -> re-vidé).
             #    SOCFULL participe : s'il ne livre que son solaire (firmware), l'intégrateur P1
             #    reporte le déficit sur le suivant.
-            # SEUIL D'ENGAGEMENT : sous `min_engage`, ce qui reste à couvrir ne justifie pas de
-            # réveiller un onduleur SANS PV — il consomme ~50 W pour fonctionner, en sortir 50 W est
-            # une perte nette. Un producteur déjà engagé à l'étape 1 n'est pas concerné (il tourne
-            # déjà). Hystérésis via `engage_active` : une fois engagé on continue jusqu'à retomber
-            # sous la moitié du seuil, pour ne pas faire démarrer/arrêter en boucle autour.
-            engaged = demand >= (me / 2 if self.engage_active else me)
-            self.engage_active = engaged
+            # Le SEUIL D'ENGAGEMENT est appliqué plus bas, sur la PART de chaque appareil
+            # (cf. `_engage_ok`) — le tester ici sur le besoin total était le bug de la 1.4.3.6.
             batt: list[ZendureDevice] = []
             for d in devices:
-                if me > 0 and not engaged and cmd[d] <= 0 and not self._is_producer(d, now):
-                    continue
                 if self.floor.get(d.deviceId):
                     if d.state != DeviceState.SOCEMPTY and d.electricLevel.asInt > d.minSoc.asNumber + 3:
                         self.floor[d.deviceId] = False
@@ -458,11 +466,15 @@ class FondationEngine:
                 share = demand
                 for d in batt:
                     take = min(share * weights[d] / total_w if total_w > 0 else 0.0, dis_cap(d))
+                    if not self._engage_ok(d, take, me, now):
+                        continue
                     cmd[d] += take
                     demand -= take
                     fuse_used[d.fuseGrp] = fuse_used.get(d.fuseGrp, 0.0) + take
                 for d in batt:
                     take = min(demand, dis_cap(d))
+                    if not self._engage_ok(d, take, me, now):
+                        continue
                     cmd[d] += take
                     demand -= take
                     fuse_used[d.fuseGrp] = fuse_used.get(d.fuseGrp, 0.0) + take
@@ -474,6 +486,8 @@ class FondationEngine:
                     batt.sort(key=lambda d: d.electricLevel.asInt + (hyst if self.lead.get(d.deviceId) else 0), reverse=True)
                 for d in batt:
                     take = min(demand, dis_cap(d))
+                    if not self._engage_ok(d, take, me, now):
+                        continue
                     cmd[d] += take
                     demand -= take
                     fuse_used[d.fuseGrp] = fuse_used.get(d.fuseGrp, 0.0) + take
