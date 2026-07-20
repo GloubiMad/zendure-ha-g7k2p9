@@ -3,8 +3,11 @@
 L'amont possède un `writeSimulation` minimal ; on écrit ici un format ÉTENDU, compatible avec nos
 visualiseurs et nos outils de rejeu.
 
-Colonnes : `Time;P1;Operation;Battery;Solar;Home;SetPoint;--;` puis, PAR DEVICE, un bloc de 13 :
-`bat;Prod;Home;Cmd;Soc;Conn;ChLim;St;Age;Grid;Byp;Tmp;CTmp` — et une colonne finale de debug moteur.
+Colonnes : `Time;P1;Operation;Battery;Solar;Home;SetPoint;--;` puis, PAR DEVICE, un bloc de 14 :
+`bat;Prod;Home;Cmd;Soc;Conn;ChLim;St;Age;Grid;Byp;Tmp;CTmp;Byp2` — et une colonne finale de debug moteur.
+
+⚠️ `Byp` (= `exports_bypass`, dérivé de gridReverse) et `Byp2` (= `d.byPass`, l'état réel publié par
+l'appareil) sont DEUX choses différentes. C'est `Byp2` qui compte pour le pilotage.
 
 ⚠️ PIÈGES connus (à respecter côté outils d'analyse) :
   - l'en-tête contient un blob JSON PAR DEVICE que les lignes de données n'ont PAS
@@ -72,7 +75,7 @@ class SimulationLog:
         return (
             "Time;P1;Operation;Battery;Solar;Home;SetPoint;--;"
             + ";".join([
-                f"bat;Prod;Home;Cmd;Soc;Conn;ChLim;St;Age;Grid;Byp;Tmp;CTmp;{
+                f"bat;Prod;Home;Cmd;Soc;Conn;ChLim;St;Age;Grid;Byp;Tmp;CTmp;Byp2;{
                     json.dumps(
                         DeviceSettings(
                             d.name,
@@ -116,7 +119,13 @@ class SimulationLog:
                     thome += (pwr_home := d.homeOutput.asInt - d.homeInput.asInt)
                     # St = DeviceState (0=OFFLINE 1=SOCEMPTY 2=INACTIVE 3=SOCFULL 4=ACTIVE)
                     age = int((time - (d.lastseen - timedelta(minutes=5))).total_seconds()) if d.lastseen != datetime.min else -1
-                    # Grid = gridReverse (0=disabled 1=allow 2=forbidden ; -1 si non reçu) ; Byp = exports_bypass.
+                    # Grid = gridReverse (0=disabled 1=allow 2=forbidden ; -1 si non reçu).
+                    # ⚠️ DEUX notions distinctes sous des noms voisins, ne pas les confondre :
+                    #   Byp  = `exports_bypass`, simple booléen dérivé de gridReverse (== allow) ;
+                    #   Byp2 = `d.byPass`, l'ÉTAT RÉEL de bypass publié par l'appareil.
+                    # C'est Byp2 qui pilote le saut d'envoi de la consigne 0 dans fondation.py, et son
+                    # absence du CSV a rendu un bug indéductible le 20/07 (il fallait le déduire du
+                    # comportement au lieu de le lire).
                     gr = d.entities.get("gridReverse")
                     grv = getattr(gr, "value", None) if gr is not None else None
                     grid = grv if grv is not None else -1
@@ -128,7 +137,7 @@ class SimulationLog:
                     data += (
                         f";{pwr_battery};{pwr_solar};{pwr_home};{m.fondation.cmd_of(d)};{d.electricLevel.asInt}"
                         f";{d.connectionStatus.asInt};{d.charge_limit};{d.state.value};{age};{grid};{int(d.exports_bypass)}"
-                        f";{tmp};{ctmp}"
+                        f";{tmp};{ctmp};{d.byPass.asInt}"
                     )
 
                 # Queue de ligne debug du moteur fondation (colonne finale, ignorée par les parseurs).

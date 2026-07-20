@@ -543,9 +543,17 @@ class FondationEngine:
                 await d.power_discharge(c)
             elif c < 0:
                 await d.power_charge(c)
-            elif d.byPass.asInt > 0:
+            elif d.byPass.asInt > 0 and max(0, d.pwr_offgrid) > 0:
+                # On ne saute l'envoi QUE si une sortie AC de secours en dépend : la couper serait
+                # pire que de laisser passer le bypass. C'était l'intention du garde-fou d'origine.
                 continue
             else:
+                # BUG (mesuré 20/07) : l'ancien garde-fou sautait l'envoi dès que byPass > 0, donc la
+                # consigne 0 n'était JAMAIS transmise à un device en bypass. Il restait figé sur sa
+                # dernière consigne non nulle — glagla obéissait à 344 puis 156, puis gardait 155 W
+                # indéfiniment pendant que son PV variait, en exportant. Le code n'a pas changé : un
+                # Hyper active son bypass en SOCFULL, situation devenue permanente quand tout le parc
+                # a atteint 100 %. Le zéro doit partir.
                 await d.power_discharge(0 if max(0, d.pwr_offgrid) == 0 else 10)
 
         # --- observabilité ---
