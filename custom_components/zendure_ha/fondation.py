@@ -363,16 +363,19 @@ class FondationEngine:
             me = self.min_engage.asNumber
             fuse_p1: dict[object, float] = {}  # budget fusegroup consommé dès l'étape 1
             for d in devices:
-                dr = self.drain_ema.get(d.deviceId, 0.0)
-                if not self._is_producer(d, now) or (me > 0 and dr > me):
+                if not self._is_producer(d, now):
                     continue
                 # En AUTORISÉ le firmware ignore la consigne : le commander ne sert à rien, et sa
                 # production est déjà comptée dans `forced`. L'inclure ici la compterait deux fois.
                 gr = d.entities.get("gridReverse")
                 if (getattr(gr, "value", None) == 1) if gr is not None else False:
                     continue
+                # Même règle qu'en contrôle direct : son solaire + au plus `me` de batterie. On
+                # PLAFONNE, on ne conditionne pas sur `drain_ema` — conditionner sur une grandeur que
+                # la commande elle-même détermine fabrique un bang-bang (cf. 20:28 le 20/07).
                 used = fuse_p1.get(d.fuseGrp, 0.0)
-                take = max(0.0, min(demand, float(d.discharge_limit), float(d.fuseGrp.maxpower) - used))
+                ceiling = max(0.0, self.pv_ema[d.deviceId] - ovh) + (me if me > 0 else demand)
+                take = max(0.0, min(demand, ceiling, float(d.discharge_limit), float(d.fuseGrp.maxpower) - used))
                 cmd[d] = take
                 demand -= take
                 fuse_p1[d.fuseGrp] = used + take
@@ -733,8 +736,17 @@ class FondationEngine:
             deficit = max(0.0, base - forced + self.integral)
             for d in full_prod:
                 solar = max(0.0, self.pv_ema[d.deviceId] - ovh)
-                dr = self.drain_ema.get(d.deviceId, 0.0)
-                extra = 0.0 if (me > 0 and dr >= me) else min(deficit, me if me > 0 else deficit)
+                # Le soutirage batterie est PLAFONNÉ, pas conditionné. Version précédente :
+                #     extra = 0 if drain_ema >= me else min(deficit, me)
+                # C'était un interrupteur binaire sur une grandeur QUE NOTRE PROPRE COMMANDE
+                # DÉTERMINE : au-dessus du seuil on coupait le producteur à son solaire, tout
+                # basculait sur les autres batteries, son soutirage retombait, on le réengageait,
+                # il repuisait... Bang-bang mesuré le 20/07 à 20:28 : consignes 867/292/0/1000/500/0
+                # en 30 s, prod= oscillant 139-366, et le slew courant après une cible qui changeait
+                # de camp toutes les 5 s.
+                # En plafonnant simplement l'extra à `me`, le soutirage ne peut pas dépasser `me` par
+                # construction : le garde-fou devient inutile, et la boucle disparaît avec lui.
+                extra = min(deficit, me) if me > 0 else deficit
                 cmd[d] = min(solar + extra, float(d.discharge_limit), float(d.fuseGrp.maxpower))
                 deficit = max(0.0, deficit - extra)
                 fuse_used[d.fuseGrp] = fuse_used.get(d.fuseGrp, 0.0) + cmd[d]
