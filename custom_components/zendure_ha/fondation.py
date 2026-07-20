@@ -714,13 +714,30 @@ class FondationEngine:
                 rem -= take
                 fuse_used[d.fuseGrp] = fuse_used.get(d.fuseGrp, 0.0) + take
         else:
-            # DÉFICIT : les pleins sortent tout leur solaire, les batteries fournissent le reste
+            # DÉFICIT : le producteur sort son solaire PUIS puise dans sa batterie jusqu'à
+            # `min_engage`, et seulement au-delà les autres batteries prennent le relais.
+            #
+            # ⚠️ On ne plafonne PLUS au solaire mesuré. On ne peut pas connaître le PV disponible
+            # d'un appareil tant qu'il n'a pas puisé dans sa batterie : `solarInput` ne mesure que ce
+            # qu'on lui permet de produire. Se limiter à `pv_ema - ovh` était donc circulaire, et
+            # rendait le soutirage batterie du producteur STRUCTURELLEMENT impossible — mesuré le
+            # 20/07 : glagla plafonné à 221 W alors qu'il pouvait fournir 285 W (60 W de solaire
+            # perdus), batterie à 0 W, et le SolarFlow vidant la sienne à sa place.
+            #
+            # On demande donc solaire + une part de batterie ; c'est le firmware qui arbitre. Le
+            # soutirage réel (`drain_ema`, non suppressible par la consigne) sert de garde-fou :
+            # au-delà de `min_engage` le producteur n'a plus rien de gratuit et on rend la main.
             self.regime = ManagerState.DISCHARGE
             fuse_used = {}
-            for d in full_prod:
-                cmd[d] = min(max(0.0, self.pv_ema[d.deviceId] - ovh), float(d.discharge_limit))
-                fuse_used[d.fuseGrp] = fuse_used.get(d.fuseGrp, 0.0) + cmd[d]
+            me = self.min_engage.asNumber
             deficit = max(0.0, base - forced + self.integral)
+            for d in full_prod:
+                solar = max(0.0, self.pv_ema[d.deviceId] - ovh)
+                dr = self.drain_ema.get(d.deviceId, 0.0)
+                extra = 0.0 if (me > 0 and dr >= me) else min(deficit, me if me > 0 else deficit)
+                cmd[d] = min(solar + extra, float(d.discharge_limit), float(d.fuseGrp.maxpower))
+                deficit = max(0.0, deficit - extra)
+                fuse_used[d.fuseGrp] = fuse_used.get(d.fuseGrp, 0.0) + cmd[d]
             batt = [d for d in devices if d not in full_prod and d.electricLevel.asInt > d.minSoc.asNumber]
             batt.sort(key=lambda d: d.electricLevel.asInt, reverse=True)
             for d in batt:
