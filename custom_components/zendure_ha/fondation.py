@@ -255,23 +255,26 @@ class FondationEngine:
         # demande CONTRÔLABLE : T* = house_load − déversement forcé. Si T* < 0, ce surplus doit
         # être ABSORBÉ en CHARGEANT les batteries non-pleines (au lieu d'exporter). C'était LE
         # trou du moteur : sans ça, house_load reste positif (invariant) → décharge en boucle → export.
-        # forced : selon le MODE gridReverse envoyé au firmware du device (0=désactivé 1=autorisé 2=interdit).
-        #  - AUTORISÉ (1, dump libre) : le firmware sort TOUT le solaire -> forced = passthrough THÉORIQUE
-        #    (instantané, pas de lag). up absorbe le surplus ; export seulement si up saturé/plein.
-        #  - DÉSACTIVÉ (0) ou INTERDIT (2) : le firmware ÉCRÊTE le solaire pour ne PAS exporter
-        #    -> forced = déversement MESURÉ (suit l'écrêtage). Pas de sur-charge depuis le réseau ;
-        #    le surplus est écrêté au lieu d'être stocké. (par défaut = mesuré, prudent, si mode inconnu.)
+        # ⚠️ `forced` ne vaut QUE pour un device qu'on ne pilote PAS.
+        #
+        # AUTORISÉ (gridReverse=1) : le firmware ignore la consigne et déverse tout — mesuré, 719 W
+        # sortis pour une consigne de 0. On ne peut que le constater : il compte dans `forced` et il
+        # est EXCLU de l'étape 1 (le commander ne servirait à rien).
+        #
+        # DÉSACTIVÉ (0) / INTERDIT (2) : depuis la 1.4.3.5 la consigne est réellement transmise et
+        # l'appareil OBÉIT. Sa production n'est donc plus « forcée » : elle est commandée à l'étape 1.
+        # La compter ici AUSSI la comptait DEUX FOIS — mesuré le 20/07 : forced 386 W + consigne
+        # 407 W = 793 W attendus de glagla, pour 365 W réellement sortis. Les 429 W de trop étaient
+        # retirés de la demande pilotable, si bien que la consigne de glagla restait TOUJOURS sous son
+        # PV : sa batterie ne pouvait structurellement jamais servir, et c'est le SolarFlow qui vidait
+        # la sienne à sa place.
         forced = 0.0
         for d in devices:
             if d.state != DeviceState.SOCFULL or self.pv_ema[d.deviceId] <= 0:
                 continue
-            passthrough = max(0.0, self.pv_ema[d.deviceId] - ovh)
             gr = d.entities.get("gridReverse")
-            allow = getattr(gr, "value", None) == 1 if gr is not None else False
-            if allow:
-                forced += passthrough
-            else:
-                forced += min(passthrough, float(max(0, d.homeOutput.asInt - d.homeInput.asInt)))
+            if (getattr(gr, "value", None) == 1) if gr is not None else False:
+                forced += max(0.0, self.pv_ema[d.deviceId] - ovh)
         t_raw = hl_raw - forced
 
         # --- split-EMA : le régime décide sur le LISSÉ, les montants sur le BRUT ---
@@ -362,6 +365,11 @@ class FondationEngine:
             for d in devices:
                 dr = self.drain_ema.get(d.deviceId, 0.0)
                 if not self._is_producer(d, now) or (me > 0 and dr > me):
+                    continue
+                # En AUTORISÉ le firmware ignore la consigne : le commander ne sert à rien, et sa
+                # production est déjà comptée dans `forced`. L'inclure ici la compterait deux fois.
+                gr = d.entities.get("gridReverse")
+                if (getattr(gr, "value", None) == 1) if gr is not None else False:
                     continue
                 used = fuse_p1.get(d.fuseGrp, 0.0)
                 take = max(0.0, min(demand, float(d.discharge_limit), float(d.fuseGrp.maxpower) - used))
