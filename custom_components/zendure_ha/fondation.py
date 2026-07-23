@@ -38,6 +38,11 @@ _LOGGER = logging.getLogger(__name__)
 PV_MEMORY = 1800.0  # s
 PV_SEEN_MIN = 50.0  # W — au-dessus, on considère qu'il produit vraiment
 
+# Nombre de cycles consécutifs de refus avant de plafonner un puits sur ce qu'il accepte
+# réellement. 3 cycles ≈ 15 s : assez pour écarter une rampe de démarrage, assez court pour que
+# le reliquat déborde sur le puits suivant bien avant les 50 s observées le 23/07.
+CHG_REFUSE_N = 3
+
 
 class FondationNumber(ZendureRestoreNumber):
     """Number restaurable AVEC valeur par défaut (le parent restaure 0 quand rien n'a jamais été stocké)."""
@@ -65,6 +70,8 @@ class FondationEngine:
         self.amt_ema: float | None = None      # EMA de house_load (montants des consignes)
         self.pv_seen: dict[str, datetime] = {}   # dernier instant où ce device a VRAIMENT produit
         self.drain_ema: dict[str, float] = {}    # EMA du soutirage batterie par device (+ = se vide)
+        self.chg_accept: dict[str, float] = {}   # charge réellement ACCEPTÉE par device (plafond)
+        self.chg_refuse: dict[str, int] = {}     # cycles consécutifs de refus de charge
         self.pv_ema: dict[str, float] = {}     # EMA du PV par device (distribution)
         self.lead: dict[str, bool] = {}        # hystérésis sticky par device (décharge batterie)
         self.clead: dict[str, bool] = {}       # hystérésis sticky par device (charge)
@@ -109,6 +116,23 @@ class FondationEngine:
         if me <= 0 or take <= 0 or self._is_producer(d, now):
             return True
         return take >= (me / 2 if abs(self.cmd_applied.get(d.deviceId, 0)) > 0 else me)
+
+    def _chg_ceiling(self, d: ZendureDevice) -> float:
+        """Plafond de charge basé sur l'ACCEPTATION MESURÉE, + une marge de ré-exploration.
+
+        Un device peut refuser durablement la charge sans que rien ne l'annonce : le SolarFlow
+        tapère au-dessus de ~94 % de SoC et son `ChLim` continue d'afficher −2400 W. Allouer sur
+        la limite nominale lui donne tout le budget, et le reliquat part au réseau au lieu d'aller
+        au puits suivant.
+
+        ANTI-CLIQUET — le piège de ce genre de plafond : si on ne demande plus que ce qu'il accepte,
+        on ne découvre jamais qu'il peut reprendre. D'où la marge `chg_probe` : on offre toujours un
+        peu plus que le mesuré. S'il peut, il absorbe plus, l'EMA monte, le plafond suit — remontée
+        continue, sans le bang-bang qu'un seuil binaire fabriquerait (cf. 1.4.3.11).
+        """
+        if (acc := self.chg_accept.get(d.deviceId)) is None:
+            return float(-d.charge_limit)
+        return min(float(-d.charge_limit), acc + self.chg_probe.asNumber)
 
     def _bypass_blocks(self, d: ZendureDevice) -> bool:
         """Le bypass disqualifie de l'ABSORPTION les seuls PRODUCTEURS.
@@ -157,6 +181,9 @@ class FondationEngine:
         # Profondeur NÉGATIVE autorisée pour l'intégrale en régime CHARGE (correctif « B »).
         # 0 = ancien comportement (plancher à 0, import permanent incorrigible).
         self.int_neg = FondationNumber(m, "fondation_int_neg", 1200, 0, 3000, "W")
+        # Marge de ré-exploration au-dessus de l'acceptation mesurée (cf. `_chg_ceiling`).
+        # Très grand (3000) = plafond désactivé, on retombe sur la limite nominale.
+        self.chg_probe = FondationNumber(m, "fondation_chg_probe", 150, 50, 3000, "W")
         self.surplus_on = FondationNumber(m, "fondation_surplus_on", 300, 50, 1500, "W")
         self.surplus_off = FondationNumber(m, "fondation_surplus_off", 150, 20, 1200, "W")
         # Dwell d'INVERSION (nb de cycles) : une batterie ne passe pas charge<->décharge sur un
@@ -231,6 +258,30 @@ class FondationEngine:
             drain = float(d.batteryOutput.asInt - d.batteryInput.asInt)
             dprev = self.drain_ema.get(d.deviceId)
             self.drain_ema[d.deviceId] = drain if dprev is None else palpha * drain + (1.0 - palpha) * dprev
+
+            # ACCEPTATION EN CHARGE : ce que le device absorbe VRAIMENT quand on lui demande de
+            # charger. PAS d'EMA ici — une moyenne mettrait ~50 s à descendre, soit exactement le
+            # délai qu'on cherche à supprimer (mesuré le 23/07 : 50 s avant que up prenne le relais).
+            #
+            #   il SUIT   -> on retient le max observé : le plafond remonte tout de suite ;
+            #   il REFUSE -> après CHG_REFUSE_N cycles consécutifs (le temps d'écarter une simple
+            #                rampe de démarrage), on descend D'UN COUP sur le mesuré.
+            #
+            # Confirmer sur plusieurs cycles est ce qui évite de brimer un device en pleine montée ;
+            # snapper ensuite est ce qui rend le débordement immédiat.
+            asked = float(max(0, -self.cmd_applied.get(d.deviceId, 0)))
+            if asked > 50:
+                absorbed = float(max(0, d.homeInput.asInt - d.homeOutput.asInt))
+                if absorbed >= asked - 100:
+                    self.chg_refuse[d.deviceId] = 0
+                    self.chg_accept[d.deviceId] = max(self.chg_accept.get(d.deviceId, 0.0), absorbed)
+                else:
+                    n = self.chg_refuse.get(d.deviceId, 0) + 1
+                    self.chg_refuse[d.deviceId] = n
+                    if n >= CHG_REFUSE_N:
+                        self.chg_accept[d.deviceId] = min(self.chg_accept.get(d.deviceId, float("inf")), absorbed)
+            else:
+                self.chg_refuse[d.deviceId] = 0
 
         cmd: dict[ZendureDevice, float] = dict.fromkeys(devices, 0.0)
 
@@ -537,12 +588,20 @@ class FondationEngine:
             fuse_used = {}
 
             def chg_cap(d: ZendureDevice) -> float:
-                # place de charge ENCORE disponible : min(marge device, marge fusegroup).
-                # BUG corrigé (même famille que dis_cap) : `used` inclut déjà -cmd[d] ; l'ancienne
-                # formule `min(limit, minpower-used) + cmd[d]` resoustrayait -> place sous-estimée
-                # dès la 2e passe (parallel) et pour tout usage après la distribution du bus.
+                # place de charge ENCORE disponible : min(marge device, marge fusegroup, ACCEPTATION
+                # MESURÉE). BUG corrigé (même famille que dis_cap) : `used` inclut déjà -cmd[d] ;
+                # l'ancienne formule `min(limit, minpower-used) + cmd[d]` resoustrayait -> place
+                # sous-estimée dès la 2e passe (parallel) et pour tout usage après le bus.
+                #
+                # `chg_accept` est le 3e plafond : ce que le device ABSORBE réellement. Sans lui, le
+                # moteur alloue sur `charge_limit` NOMINAL (-2400 pour le SolarFlow) alors qu'en
+                # tapering il n'accepte plus que ~380 W. Mesuré le 23/07 à 16:18 : SolarFlow à 94 %
+                # de SoC, commandé 2296 W, il en absorbe 374 ; les 900 W de surplus sont partis au
+                # réseau pendant 50 s alors que up avait 77 % de place libre et 1200 W de capacité.
+                # Le plafonner ici fait DÉBORDER le reliquat sur le device suivant dès le 1er cycle
+                # (`rem` n'est décrémenté que du `take` réellement alloué).
                 used = fuse_used.get(d.fuseGrp, 0.0)
-                return max(0.0, min(-d.charge_limit + cmd[d], -d.fuseGrp.minpower - used))
+                return max(0.0, min(-d.charge_limit + cmd[d], -d.fuseGrp.minpower - used, self._chg_ceiling(d)))
 
             cstrat = self.charge_strategy.value
             if cstrat == 3:  # parallel : prorata place (100−SoC)×capacité, reliquat en 2e passe
@@ -682,6 +741,7 @@ class FondationEngine:
             f" ema={int(t_reg)} amt={int(self.amt_ema) if self.amt_ema is not None else 0}"
             f" int={int(self.integral)} sp={setpoint}"
             f" prod={'/'.join(f'{int(self.drain_ema.get(d.deviceId, 0))}' for d in devices if self._is_producer(d, datetime.now())) or '-'}"
+            f" acc={'/'.join(f'{int(self.chg_accept[d.deviceId])}' for d in devices if d.deviceId in self.chg_accept) or '-'}"
             f" strat={self.discharge_strategy.value}/{self.charge_strategy.value}"
         )
         _LOGGER.info(
