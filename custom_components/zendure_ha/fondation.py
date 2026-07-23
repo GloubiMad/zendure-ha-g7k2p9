@@ -43,6 +43,12 @@ PV_SEEN_MIN = 50.0  # W — au-dessus, on considère qu'il produit vraiment
 # le reliquat déborde sur le puits suivant bien avant les 50 s observées le 23/07.
 CHG_REFUSE_N = 3
 
+# Marge de ré-exploration côté PRODUCTION. Volontairement bien plus petite que `chg_probe` :
+# offrir trop à un puits est gratuit (il refuse), demander trop à un producteur crée de l'import.
+# 40 W laissent la production remonter d'elle-même quand l'appareil refroidit, pour un biais
+# d'import résiduel négligeable.
+PROD_PROBE = 40.0
+
 
 class FondationNumber(ZendureRestoreNumber):
     """Number restaurable AVEC valeur par défaut (le parent restaure 0 quand rien n'a jamais été stocké)."""
@@ -72,6 +78,8 @@ class FondationEngine:
         self.drain_ema: dict[str, float] = {}    # EMA du soutirage batterie par device (+ = se vide)
         self.chg_accept: dict[str, float] = {}   # charge réellement ACCEPTÉE par device (plafond)
         self.chg_refuse: dict[str, int] = {}     # cycles consécutifs de refus de charge
+        self.prod_accept: dict[str, float] = {}  # production réellement LIVRÉE par device (plafond)
+        self.prod_refuse: dict[str, int] = {}    # cycles consécutifs de sous-livraison
         self.pv_ema: dict[str, float] = {}     # EMA du PV par device (distribution)
         self.lead: dict[str, bool] = {}        # hystérésis sticky par device (décharge batterie)
         self.clead: dict[str, bool] = {}       # hystérésis sticky par device (charge)
@@ -269,6 +277,22 @@ class FondationEngine:
             #
             # Confirmer sur plusieurs cycles est ce qui évite de brimer un device en pleine montée ;
             # snapper ensuite est ce qui rend le débordement immédiat.
+            # PRODUCTION RÉELLEMENT LIVRÉE (miroir de chg_accept, côté sortie). Même règle : on
+            # retient le max quand il suit, on descend d'un coup après CHG_REFUSE_N refus confirmés.
+            out_asked = float(max(0, self.cmd_applied.get(d.deviceId, 0)))
+            if out_asked > 50:
+                out_real = float(max(0, d.homeOutput.asInt - d.homeInput.asInt))
+                if out_real >= out_asked - 100:
+                    self.prod_refuse[d.deviceId] = 0
+                    self.prod_accept[d.deviceId] = max(self.prod_accept.get(d.deviceId, 0.0), out_real)
+                else:
+                    n = self.prod_refuse.get(d.deviceId, 0) + 1
+                    self.prod_refuse[d.deviceId] = n
+                    if n >= CHG_REFUSE_N:
+                        self.prod_accept[d.deviceId] = min(self.prod_accept.get(d.deviceId, float("inf")), out_real)
+            else:
+                self.prod_refuse[d.deviceId] = 0
+
             asked = float(max(0, -self.cmd_applied.get(d.deviceId, 0)))
             if asked > 50:
                 absorbed = float(max(0, d.homeInput.asInt - d.homeOutput.asInt))
@@ -643,7 +667,21 @@ class FondationEngine:
                 for d in devices:
                     if d.state == DeviceState.SOCFULL or cmd[d] < 0:
                         continue  # plein, ou déjà en charge depuis le bus : on ne lui demande pas de sortir
+                    # ⚠️ On plafonne sur ce que le producteur LIVRE, pas sur son `pv_ema`.
+                    # Mesuré le 23/07 à 16:45 : pv_ema 1298 W -> le moteur route 1200 W vers up,
+                    # mais glagla n'en livre que 847 (dérating thermique à 64 °C + charge de sa
+                    # propre batterie à 37 % de SoC). up absorbe bien 1200, les 220 W manquants
+                    # sont pris au RÉSEAU. `overhead` à 150 (son maximum) n'en corrigeait que la
+                    # moitié — et une constante ne peut pas convenir, l'écart valant 0 W à froid
+                    # et ~320 W à 64 °C.
+                    #
+                    # ASYMÉTRIE VOULUE avec `_chg_ceiling` : offrir 150 W de trop à un PUITS est
+                    # sans conséquence (il ne les prend pas), alors qu'en demander 150 de trop à un
+                    # PRODUCTEUR fabrique directement de l'import. D'où une marge de ré-exploration
+                    # bien plus petite ici (PROD_PROBE).
                     spare = max(0.0, self.pv_ema[d.deviceId] - ovh - cmd[d])
+                    if (acc := self.prod_accept.get(d.deviceId)) is not None:
+                        spare = min(spare, max(0.0, acc + PROD_PROBE - cmd[d]))
                     if spare > 0:
                         prod_extra[d] = min(spare, min(float(d.discharge_limit), float(d.fuseGrp.maxpower)) - cmd[d])
                 routable = min(sum(prod_extra.values()), room_left)
@@ -742,6 +780,7 @@ class FondationEngine:
             f" int={int(self.integral)} sp={setpoint}"
             f" prod={'/'.join(f'{int(self.drain_ema.get(d.deviceId, 0))}' for d in devices if self._is_producer(d, datetime.now())) or '-'}"
             f" acc={'/'.join(f'{int(self.chg_accept[d.deviceId])}' for d in devices if d.deviceId in self.chg_accept) or '-'}"
+            f" liv={'/'.join(f'{int(self.prod_accept[d.deviceId])}' for d in devices if d.deviceId in self.prod_accept) or '-'}"
             f" strat={self.discharge_strategy.value}/{self.charge_strategy.value}"
         )
         _LOGGER.info(
