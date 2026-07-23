@@ -485,7 +485,16 @@ class FondationEngine:
             if demand > 0:
                 self.surplus_active = False  # pas de surplus : on relâche l'hystérésis
             else:
-                unused = {d: max(0.0, self.pv_ema[d.deviceId] - ovh - cmd[d]) for d in devices if d.state != DeviceState.SOCFULL}
+                # Même plafond de LIVRAISON MESURÉE que dans la branche CHARGE (`prod_accept`) :
+                # `pv_ema` seul surestime ce qu'un producteur dérate thermiquement va sortir.
+                unused = {
+                    d: min(
+                        max(0.0, self.pv_ema[d.deviceId] - ovh - cmd[d]),
+                        max(0.0, acc + PROD_PROBE - cmd[d]) if (acc := self.prod_accept.get(d.deviceId)) is not None else float("inf"),
+                    )
+                    for d in devices
+                    if d.state != DeviceState.SOCFULL
+                }
                 total_unused = sum(unused.values())
                 if total_unused <= 0:
                     self.surplus_active = False
@@ -503,8 +512,17 @@ class FondationEngine:
                     fuse_chg: dict[object, float] = {}
 
                     def chg_room(d: ZendureDevice) -> float:
+                        # JUMEAU de `chg_cap` (branche CHARGE) : même plafond d'ACCEPTATION MESURÉE.
+                        # Le 23/07 à 17:33 il manquait ICI, et seulement ici : le SolarFlow remonté
+                        # à 98 % de SoC n'acceptait plus que ~150 W, mais `-d.charge_limit` valait
+                        # toujours 2400. Trié en premier (le plus gros), il vidait `rem` sur le
+                        # papier ; up, avec 55 % de place libre, ne recevait rien et 750 W partaient
+                        # au réseau pendant 3 minutes. En régime CHARGE le même épisode se corrigeait
+                        # (`upCmd -323`), en IDLE non (`upCmd 0`) — la trace montrait l'alternance.
+                        # Deux fonctions font le même travail dans deux branches : patcher l'une sans
+                        # l'autre ne corrige qu'un régime sur deux.
                         used = fuse_chg.get(d.fuseGrp, 0.0)
-                        return max(0.0, min(-d.charge_limit, -d.fuseGrp.minpower - used))
+                        return max(0.0, min(-d.charge_limit, -d.fuseGrp.minpower - used, self._chg_ceiling(d)))
 
                     # Capacité de sortie SUPPLÉMENTAIRE des producteurs (limite device ET fusegroup).
                     # Sans ce plafond, on commanderait la charge au-delà de ce que le producteur peut
