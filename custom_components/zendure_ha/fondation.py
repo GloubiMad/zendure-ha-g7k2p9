@@ -154,6 +154,9 @@ class FondationEngine:
         # de SA batterie, on le préfère (son solaire est gratuit) ; au-delà, il n'a plus rien de
         # gratuit à offrir et on repasse par la stratégie de décharge normale. 0 = désactivé.
         self.min_engage = FondationNumber(m, "fondation_min_engage", 300, 0, 1000, "W")
+        # Profondeur NÉGATIVE autorisée pour l'intégrale en régime CHARGE (correctif « B »).
+        # 0 = ancien comportement (plancher à 0, import permanent incorrigible).
+        self.int_neg = FondationNumber(m, "fondation_int_neg", 1200, 0, 3000, "W")
         self.surplus_on = FondationNumber(m, "fondation_surplus_on", 300, 50, 1500, "W")
         self.surplus_off = FondationNumber(m, "fondation_surplus_off", 150, 20, 1200, "W")
         # Dwell d'INVERSION (nb de cycles) : une batterie ne passe pas charge<->décharge sur un
@@ -331,7 +334,24 @@ class FondationEngine:
         elif p1 < -db_off and not sat_chg:
             self.integral = min(self.integral + min(-p1, step), imax)
         elif p1 > db_off:
-            self.integral = max(0.0, self.integral - max(step, min(p1, 2 * step)))
+            # CORRECTIF « B » : en CHARGE, l'intégrale peut devenir NÉGATIVE (= « charge moins »).
+            # Avant, le plancher à 0 rendait un import PERMANENT structurellement incorrigible : le
+            # moteur voyait P1 positif, ne pouvait rien en faire, et l'erreur durait des heures.
+            # Mesuré le 23/07 : P1 +266 W pendant 86 min, intégrale à 0 sur 92 % des cycles.
+            # Cause de l'import : le moteur dimensionne le puits sur la CONSIGNE d'un producteur,
+            # alors que glagla dérate thermiquement au-delà de 62 °C et livre ~300 W de moins.
+            # B ne dépend d'aucun diagnostic : la boucle sur P1 rattrape l'écart quelle qu'en soit
+            # l'origine (dérating, tapering, décrochage…).
+            # Rejeu hors ligne sur 126 min de régime CHARGE (modèle validé à 2 W près sur le réel) :
+            #   P1 moyen +168 -> -26 W | import 414 -> 88 Wh | net 353 -> -55 Wh | ±100 W : 27 -> 67 %
+            #   intégrale min -584 W, jamais saturée -> pas d'emballement.
+            # ANTI-WINDUP symétrique : on n'accumule pas plus bas quand la charge est déjà annulée
+            # (l'intégrale ne peut rien de plus), sinon elle plongerait sans effet et mettrait un
+            # temps fou à remonter au retour du surplus.
+            floor = -self.int_neg.asNumber
+            if self.integral > floor and (charge_base := max(0.0, -t_amt)) + self.integral > 0:
+                self.integral = max(floor, self.integral - max(step, min(p1, 2 * step)))
+                self.integral = max(self.integral, -charge_base)
 
         # --- consignes (sur la demande CONTRÔLABLE t_amt, pas house_load) ---
         cmd: dict[ZendureDevice, float] = dict.fromkeys(devices, 0.0)
@@ -507,7 +527,9 @@ class FondationEngine:
                 self.lead[d.deviceId] = (cmd[d] - ns) > 5
                 self.clead[d.deviceId] = False
         elif self.regime == ManagerState.CHARGE:
-            rem = max(0.0, -t_amt) + self.integral
+            # Une intégrale négative RÉDUIT la charge, elle ne doit jamais l'INVERSER en décharge :
+            # `rem` est un montant de charge, un `rem` négatif ferait `cmd[d] -= rem` donc sortir.
+            rem = max(0.0, max(0.0, -t_amt) + self.integral)
             # SOCFULL exclu (c'est LUI qui déverse le surplus qu'on absorbe) ;
             # bypass exclu SEULEMENT s'il produit (cf. _bypass_blocks) : un device sans PV
             # en bypass reste un puits parfaitement valide.
