@@ -179,9 +179,17 @@ class FondationEngine:
         """
         return d.byPass.asInt > 0 and self.pv_ema.get(d.deviceId, 0.0) > 0
 
+    # Nombre de fois que createEntities() a été exécuté depuis le démarrage du processus HA.
+    # Compteur de CLASSE, donc partagé par toutes les instances : c'est le test direct de
+    # l'hypothèse « les entités sont créées deux fois et le moteur garde les mauvaises ».
+    # Attendu = 1 par chargement d'intégration. Si un simple démarrage affiche déjà 2, la mise en
+    # place a été rejouée (retour ConfigEntryNotReady, par exemple) et tout s'explique.
+    loads: int = 0
+
     def createEntities(self) -> None:
         """Paramètres à chaud + capteurs d'observabilité, sur le device Manager."""
         m = self.manager
+        FondationEngine.loads += 1
         self._par_prev = ""  # force une ligne `par=` neuve à chaque (re)chargement de l'intégration
         self.db_on = FondationNumber(m, "fondation_db_on", 80, 40, 300, "W")
         self.db_off = FondationNumber(m, "fondation_db_off", 30, 10, 100, "W")
@@ -859,13 +867,57 @@ class FondationEngine:
             f" stp{self.step.asNumber} hyd{self.hyst_device.asNumber} ovh{self.overhead.asNumber}"
             f" slw{self.slew.asNumber} eng{self.min_engage.asNumber} ing{self.int_neg.asNumber}"
             f" cpr{self.chg_probe.asNumber} sur{self.surplus_on.asNumber}/{self.surplus_off.asNumber}"
-            f" dwi{self.dwell_invert.asNumber}"
+            f" dwi{self.dwell_invert.asNumber} load{FondationEngine.loads}/{id(self) & 0xFFFF:04x}"
         )
-        if snap == self._par_prev:
+        split = self._split()
+        if snap + split == self._par_prev:
             return ""
-        self._par_prev = snap
-        _LOGGER.warning("Fondation paramètres effectifs : %s", snap)
-        return f" par=[{snap}]"
+        self._par_prev = snap + split
+        _LOGGER.warning("Fondation paramètres effectifs : %s%s", snap, split)
+        return f" par=[{snap}]{split}"
+
+    def _param_entities(self) -> list[tuple[str, FondationNumber]]:
+        """Les paramètres réglables, sous forme (étiquette courte, entité)."""
+        return [
+            ("db_on", self.db_on), ("db_off", self.db_off), ("ft", self.fast_track),
+            ("hl_a", self.hl_alpha), ("amt_a", self.amt_alpha), ("pv_a", self.pv_alpha),
+            ("step", self.step), ("hyst", self.hyst_device), ("ovh", self.overhead),
+            ("slew", self.slew), ("eng", self.min_engage), ("int_neg", self.int_neg),
+            ("chg_probe", self.chg_probe), ("sur_on", self.surplus_on),
+            ("sur_off", self.surplus_off), ("dwell", self.dwell_invert),
+        ]
+
+    def _split(self) -> str:
+        """DIAGNOSTIC : l'objet que lit le moteur est-il celui que Home Assistant affiche ?
+
+        Constat du 24/07 : après un rechargement, l'UI montrait fast_track 700 / amt_alpha 30 /
+        step 30 pendant que le moteur appliquait 200 / 100 / 120. Trois sources (UI, moteur,
+        core.restore_state) donnaient trois réponses différentes, sans qu'aucune lecture de fichier
+        ne puisse les départager. On fait donc poser la question au code lui-même, à chaque cycle.
+
+        Pour chaque paramètre en désaccord on écrit :
+          `nom moteur=X ui=Y plat=ÉTAT id=XXXX`
+          - `moteur` : ce que renvoie `asNumber`, donc ce qui pilote réellement les batteries ;
+          - `ui`     : l'état publié sous l'`entity_id` de CETTE instance ;
+          - `plat`   : `NOT_ADDED` prouverait que l'objet du moteur n'a jamais été rattaché à une
+                       plateforme — donc qu'un second objet, fantôme, sert l'interface ;
+          - `id`     : identité mémoire (16 bits), pour voir si elle change d'un chargement à l'autre.
+
+        Champ vide = les deux coïncident, il n'y a PAS de dédoublement et la cause est ailleurs.
+        """
+        out = []
+        for name, ent in self._param_entities():
+            eid = getattr(ent, "entity_id", None)
+            st = self.manager.hass.states.get(eid) if eid else None
+            shown = st.state if st is not None else "-"
+            try:
+                if st is not None and float(shown) == float(ent.asNumber):
+                    continue  # d'accord : rien à signaler
+            except (TypeError, ValueError):
+                pass  # "unknown"/"unavailable" : on signale aussi
+            plat = getattr(getattr(ent, "_platform_state", None), "name", "?")
+            out.append(f"{name} moteur={ent.asNumber} ui={shown} plat={plat} id={id(ent) & 0xFFFF:04x}")
+        return " split=[" + " | ".join(out) + "]" if out else " split=[]"
 
     def _direct_control(self, devices, full_prod, base, ovh, p1, cmd, db_off, step, imax):
         """Producteur(s) plein(s) qui OBÉISSENT : on commande leur sortie = conso + charge encaissable,
