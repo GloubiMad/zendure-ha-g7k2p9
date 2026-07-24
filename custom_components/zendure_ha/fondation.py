@@ -68,22 +68,38 @@ class FondationNumber(ZendureRestoreNumber):
 
     def __init__(self, device: EntityDevice, uniqueid: str, default: int, minimum: int, maximum: int, uom: str | None = None) -> None:
         self._default = default
+        # Doit exister AVANT super(), car la restauration s'exécute pendant celui-ci (cf. ci-dessous).
+        self._restored: float | None = None
         super().__init__(device, uniqueid, None, None, uom, None, maximum, minimum, NumberMode.BOX, True)
-        # ⚠️ `super().__init__` se termine par `self.add([self])`, qui AJOUTE l'entité à Home
-        # Assistant. Tout ce qui suit cette ligne peut donc écraser une valeur déjà restaurée.
-        # On journalise l'état à ce point précis pour le prouver (24/07).
-        FondationNumber.trace.append(f"{uniqueid.replace('fondation_', '')} CTOR avant={self._attr_native_value} defaut={default} id={id(self) & 0xFFFF:04x}")
-        self._attr_native_value = default
+        # ⚠️ COURSE DE CONSTRUCTION — bug trouvé le 24/07/2026, actif depuis le 20/07.
+        #
+        # `ZendureNumber.__init__` se TERMINE par `self.add([self])`, qui ajoute l'entité à Home
+        # Assistant. Mesuré : l'ajout et `async_added_to_hass` s'exécutent DANS cet appel, donc
+        # avant que les constructeurs des classes filles aient fini. Ordre réel, prouvé par
+        # identité mémoire sur les 22 paramètres :
+        #
+        #   1. add()  -> async_added_to_hass -> restauration à 700, état publié à 700
+        #   2. retour dans ZendureRestoreNumber.__init__ : `_attr_native_value = 0`
+        #   3. retour ici                                : `_attr_native_value = default` (200)
+        #
+        # Les étapes 2 et 3 écrasent la valeur restaurée SANS republier l'état : l'interface
+        # continuait d'afficher 700 pendant que le moteur appliquait 200. Quatre jours de réglages
+        # (lissage des montants, slew, overhead, seuils du watchdog) n'ont jamais été appliqués.
+        #
+        # On rétablit donc ici ce que la restauration avait obtenu. `_restored` est renseigné en
+        # fin de `async_added_to_hass`, quel que soit le moment où celui-ci s'exécute : si la course
+        # s'inverse un jour (ajout devenu asynchrone), la ligne ci-dessous pose le défaut et
+        # `async_added_to_hass` repassera derrière avec la bonne valeur. Correct dans les deux sens.
+        self._attr_native_value = self._restored if self._restored is not None else default
 
-    # Journal de la restauration, vidé par `FondationEngine._params` dans simulation.csv.
-    # ⚠️ Diagnostic temporaire (24/07). Mesuré ce soir : l'objet est bien ADDED, il publie 700 sous
-    # son propre entity_id, et son champ interne vaut 200. La divergence naît donc ICI, entre
-    # l'entrée et la sortie de cette fonction. On enregistre chaque étape pour voir laquelle décide.
+    # Journal de restauration, écrit une fois par chargement dans simulation.csv par
+    # `FondationEngine._params`. On ne garde que les paramètres RÉGLÉS (valeur ≠ défaut) : c'est la
+    # liste de ce qui a été effectivement repris au démarrage, donc la preuve que le correctif de
+    # course ci-dessus tient. Une entité qui disparaîtrait de cette liste serait une régression.
     trace: list[str] = []
 
     async def async_added_to_hass(self) -> None:
         name = str(self.propertyName).replace("fondation_", "")
-        before = self._attr_native_value
         try:
             await super().async_added_to_hass()
         except Exception as err:  # noqa: BLE001 - on veut SAVOIR si la restauration lève
@@ -94,15 +110,11 @@ class FondationNumber(ZendureRestoreNumber):
         seen = "None" if state is None else str(state.state)
         if state is None or state.state in (None, "unknown", "unavailable"):
             self._attr_native_value = self._default
-        # On journalise TOUJOURS, y compris quand rien ne bouge : « le parent n'a rien restauré »
-        # est justement le résultat qu'on cherche à distinguer de « il a restauré puis on a écrasé ».
-        # `id` est LA pièce manquante : si elle coïncide avec celle que `split=` rapporte pour le
-        # même paramètre, alors l'objet restauré à 700 et l'objet qui applique 200 sont un seul et
-        # même objet — et la seule chose qui peut l'avoir écrasé entre les deux, c'est la fin de son
-        # propre constructeur, qui assigne la valeur par défaut APRÈS `self.add([self])`.
-        FondationNumber.trace.append(
-            f"{name} init={before} parent={restored} 2e-lecture={seen} fin={self._attr_native_value} id={id(self) & 0xFFFF:04x}"
-        )
+        # Mémorise le résultat : le constructeur, qui n'a pas encore fini de s'exécuter, le
+        # rétablira après avoir posé ses valeurs par défaut par-dessus (cf. `__init__`).
+        self._restored = self._attr_native_value
+        if restored != self._default or state is None:
+            FondationNumber.trace.append(f"{name} restaure={restored} defaut={self._default} lu={seen} retenu={self._attr_native_value}")
 
 
 class FondationEngine:
