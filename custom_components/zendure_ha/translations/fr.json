@@ -122,55 +122,55 @@
         "name": "SOC maximum"
       },
       "fondation_db_on": {
-        "name": "Seuil d'engagement"
+        "name": "· Seuil d'engagement"
       },
       "fondation_db_off": {
-        "name": "Seuil de coupure"
+        "name": "· Seuil de coupure"
       },
       "fondation_fast_track": {
-        "name": "Seuil fast-track"
+        "name": "· Seuil fast-track"
       },
       "fondation_hl_alpha": {
-        "name": "Lissage house load %"
+        "name": "· Lissage house load %"
       },
       "fondation_amt_alpha": {
-        "name": "Lissage des consignes %"
+        "name": "· Lissage des consignes %"
       },
       "fondation_pv_alpha": {
-        "name": "Lissage solaire %"
+        "name": "· Lissage solaire %"
       },
       "fondation_step": {
-        "name": "Pas de l'intégrateur"
+        "name": "· Pas de l'intégrateur"
       },
       "fondation_hyst_device": {
-        "name": "Hystérésis device %"
+        "name": "· Hystérésis device %"
       },
       "fondation_overhead": {
-        "name": "Overhead onduleur"
+        "name": "· Overhead onduleur"
       },
       "fondation_min_engage": {
-        "name": "Engagement producteur"
+        "name": "· Engagement producteur"
       },
       "fondation_int_neg": {
-        "name": "Intégrale négative max"
+        "name": "· Intégrale négative max"
       },
       "fondation_chg_probe": {
-        "name": "Sondage charge (marge)"
+        "name": "· Sondage charge (marge)"
       },
       "fondation_surplus_on": {
-        "name": "Surplus : engagement"
+        "name": "· Surplus : engagement"
       },
       "fondation_surplus_off": {
-        "name": "Surplus : coupure"
+        "name": "· Surplus : coupure"
       },
       "fondation_dwell_invert": {
-        "name": "Dwell d'inversion"
+        "name": "· Dwell d'inversion"
       },
       "fondation_slew": {
-        "name": "Slew-rate consigne"
+        "name": "· Slew-rate consigne"
       },
       "fondation_heartbeat": {
-        "name": "Battement régulation"
+        "name": "· Battement régulation"
       }
     },
     "sensor": {

@@ -71,14 +71,27 @@ class FondationNumber(ZendureRestoreNumber):
         super().__init__(device, uniqueid, None, None, uom, None, maximum, minimum, NumberMode.BOX, True)
         self._attr_native_value = default
 
+    # Journal de la restauration, vidé par `FondationEngine._params` dans simulation.csv.
+    # ⚠️ Diagnostic temporaire (24/07). Mesuré ce soir : l'objet est bien ADDED, il publie 700 sous
+    # son propre entity_id, et son champ interne vaut 200. La divergence naît donc ICI, entre
+    # l'entrée et la sortie de cette fonction. On enregistre chaque étape pour voir laquelle décide.
+    trace: list[str] = []
+
     async def async_added_to_hass(self) -> None:
-        await super().async_added_to_hass()
+        name = str(self.propertyName).replace("fondation_", "")
+        before = self._attr_native_value
+        try:
+            await super().async_added_to_hass()
+        except Exception as err:  # noqa: BLE001 - on veut SAVOIR si la restauration lève
+            FondationNumber.trace.append(f"{name} EXC-parent={type(err).__name__}:{err}")
+            raise
+        restored = self._attr_native_value
         state = await self.async_get_last_state()
+        seen = "None" if state is None else str(state.state)
         if state is None or state.state in (None, "unknown", "unavailable"):
             self._attr_native_value = self._default
-        # ⚠️ Ce chemin de restauration est SOUPÇONNÉ (24/07) de ne pas atteindre la valeur que lit le
-        # moteur : voir `FondationEngine._params`. Rien n'est corrigé ici pour l'instant — on mesure
-        # d'abord, avec `par=` dans simulation.csv, avant d'ajouter quoi que ce soit.
+        if before != restored or restored != self._attr_native_value:
+            FondationNumber.trace.append(f"{name} init={before} parent={restored} 2e-lecture={seen} fin={self._attr_native_value}")
 
 
 class FondationEngine:
@@ -190,6 +203,7 @@ class FondationEngine:
         """Paramètres à chaud + capteurs d'observabilité, sur le device Manager."""
         m = self.manager
         FondationEngine.loads += 1
+        FondationNumber.trace = []  # le journal de restauration ne concerne que CE chargement
         self._par_prev = ""  # force une ligne `par=` neuve à chaque (re)chargement de l'intégration
         self.db_on = FondationNumber(m, "fondation_db_on", 80, 40, 300, "W")
         self.db_off = FondationNumber(m, "fondation_db_off", 30, 10, 100, "W")
@@ -873,8 +887,11 @@ class FondationEngine:
         if snap + split == self._par_prev:
             return ""
         self._par_prev = snap + split
-        _LOGGER.warning("Fondation paramètres effectifs : %s%s", snap, split)
-        return f" par=[{snap}]{split}"
+        # Journal de restauration : écrit UNE fois puis vidé (il ne concerne que le chargement).
+        rest = " restore=[" + " | ".join(FondationNumber.trace) + "]" if FondationNumber.trace else ""
+        FondationNumber.trace = []
+        _LOGGER.warning("Fondation paramètres effectifs : %s%s%s", snap, split, rest)
+        return f" par=[{snap}]{split}{rest}"
 
     def _param_entities(self) -> list[tuple[str, FondationNumber]]:
         """Les paramètres réglables, sous forme (étiquette courte, entité)."""
