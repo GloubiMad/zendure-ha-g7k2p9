@@ -43,6 +43,14 @@ PV_SEEN_MIN = 50.0  # W — au-dessus, on considère qu'il produit vraiment
 # le reliquat déborde sur le puits suivant bien avant les 50 s observées le 23/07.
 CHG_REFUSE_N = 3
 
+# En dessous de cette consigne, on ne conclut JAMAIS à un refus : la rampe de démarrage représente
+# alors une part trop grande du montant pour que la mesure ait un sens (bang-bang observé le 24/07
+# au lever du soleil, quand les consignes valaient 150-300 W).
+CHG_REFUSE_MIN = 250.0
+
+# Un appareil qui progresse d'au moins ceci d'un cycle à l'autre est en RAMPE, pas en refus.
+RAMP_RISE = 25.0
+
 # Marge de ré-exploration côté PRODUCTION. Volontairement bien plus petite que `chg_probe` :
 # offrir trop à un puits est gratuit (il refuse), demander trop à un producteur crée de l'import.
 # 40 W laissent la production remonter d'elle-même quand l'appareil refroidit, pour un biais
@@ -80,6 +88,8 @@ class FondationEngine:
         self.chg_refuse: dict[str, int] = {}     # cycles consécutifs de refus de charge
         self.prod_accept: dict[str, float] = {}  # production réellement LIVRÉE par device (plafond)
         self.prod_refuse: dict[str, int] = {}    # cycles consécutifs de sous-livraison
+        self.chg_prev: dict[str, float] = {}     # absorption du cycle précédent (détection de rampe)
+        self.prod_prev: dict[str, float] = {}    # livraison du cycle précédent (détection de rampe)
         self.pv_ema: dict[str, float] = {}     # EMA du PV par device (distribution)
         self.lead: dict[str, bool] = {}        # hystérésis sticky par device (décharge batterie)
         self.clead: dict[str, bool] = {}       # hystérésis sticky par device (charge)
@@ -280,32 +290,43 @@ class FondationEngine:
             # PRODUCTION RÉELLEMENT LIVRÉE (miroir de chg_accept, côté sortie). Même règle : on
             # retient le max quand il suit, on descend d'un coup après CHG_REFUSE_N refus confirmés.
             out_asked = float(max(0, self.cmd_applied.get(d.deviceId, 0)))
-            if out_asked > 50:
-                out_real = float(max(0, d.homeOutput.asInt - d.homeInput.asInt))
-                if out_real >= out_asked - 100:
-                    self.prod_refuse[d.deviceId] = 0
-                    self.prod_accept[d.deviceId] = max(self.prod_accept.get(d.deviceId, 0.0), out_real)
-                else:
-                    n = self.prod_refuse.get(d.deviceId, 0) + 1
-                    self.prod_refuse[d.deviceId] = n
-                    if n >= CHG_REFUSE_N:
-                        self.prod_accept[d.deviceId] = min(self.prod_accept.get(d.deviceId, float("inf")), out_real)
+            out_real = float(max(0, d.homeOutput.asInt - d.homeInput.asInt))
+            # Même discriminant rampe/refus que côté charge (cf. commentaire ci-dessous).
+            up = out_real > self.prod_prev.get(d.deviceId, 0.0) + RAMP_RISE
+            self.prod_prev[d.deviceId] = out_real
+            if out_asked >= CHG_REFUSE_MIN and not up and out_real < min(out_asked - 100, out_asked * 0.75):
+                n = self.prod_refuse.get(d.deviceId, 0) + 1
+                self.prod_refuse[d.deviceId] = n
+                if n >= CHG_REFUSE_N:
+                    self.prod_accept[d.deviceId] = min(self.prod_accept.get(d.deviceId, float("inf")), out_real)
             else:
                 self.prod_refuse[d.deviceId] = 0
+                if out_asked > 50:
+                    self.prod_accept[d.deviceId] = max(self.prod_accept.get(d.deviceId, 0.0), out_real)
 
             asked = float(max(0, -self.cmd_applied.get(d.deviceId, 0)))
-            if asked > 50:
-                absorbed = float(max(0, d.homeInput.asInt - d.homeOutput.asInt))
-                if absorbed >= asked - 100:
-                    self.chg_refuse[d.deviceId] = 0
-                    self.chg_accept[d.deviceId] = max(self.chg_accept.get(d.deviceId, 0.0), absorbed)
-                else:
-                    n = self.chg_refuse.get(d.deviceId, 0) + 1
-                    self.chg_refuse[d.deviceId] = n
-                    if n >= CHG_REFUSE_N:
-                        self.chg_accept[d.deviceId] = min(self.chg_accept.get(d.deviceId, float("inf")), absorbed)
+            absorbed = float(max(0, d.homeInput.asInt - d.homeOutput.asInt))
+            rising = absorbed > self.chg_prev.get(d.deviceId, 0.0) + RAMP_RISE
+            self.chg_prev[d.deviceId] = absorbed
+            # ⚠️ UNE RAMPE MONTE, UN REFUS STAGNE. C'est le seul discriminant fiable.
+            # Version précédente : `absorbed < asked - 100`, un seuil ABSOLU. Réglé sur des consignes
+            # de 1000-2400 W, il devient absurde à 200 W : au petit matin un appareil en pleine
+            # montée est forcément 100 W sous la consigne, donc lu comme « refus ». On snappait le
+            # plafond, la consigne s'effondrait, la marge de 150 W la faisait remonter, l'appareil
+            # suivait, le plafond remontait — et on recommençait. Bang-bang de période 15-30 s,
+            # exactement celui que ce plafond était censé éviter.
+            # On exige donc trois conditions pour conclure au refus : une consigne assez GRANDE pour
+            # que la mesure ait un sens, un manque à la fois absolu ET relatif, et surtout une
+            # absorption qui NE MONTE PLUS.
+            if asked >= CHG_REFUSE_MIN and not rising and absorbed < min(asked - 100, asked * 0.75):
+                n = self.chg_refuse.get(d.deviceId, 0) + 1
+                self.chg_refuse[d.deviceId] = n
+                if n >= CHG_REFUSE_N:
+                    self.chg_accept[d.deviceId] = min(self.chg_accept.get(d.deviceId, float("inf")), absorbed)
             else:
                 self.chg_refuse[d.deviceId] = 0
+                if asked > 50:
+                    self.chg_accept[d.deviceId] = max(self.chg_accept.get(d.deviceId, 0.0), absorbed)
 
         cmd: dict[ZendureDevice, float] = dict.fromkeys(devices, 0.0)
 

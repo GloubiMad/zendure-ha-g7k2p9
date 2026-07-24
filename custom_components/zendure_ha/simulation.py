@@ -28,12 +28,39 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from homeassistant.helpers.restore_state import RestoreEntity
+
 from .button import ZendureButton
 from .const import ManagerMode
 from .device import DeviceSettings
 from .switch import ZendureSwitch
 
 _LOGGER = logging.getLogger(__name__)
+
+
+class SimulationSwitch(ZendureSwitch, RestoreEntity):
+    """Switch du journal qui SURVIT aux rechargements.
+
+    `__init__.py` fait `ZendureManager.simulation = entry.data.get(CONF_SIM, False)` au démarrage
+    ET à chaque rechargement. Le switch live, lui, n'écrit que le drapeau de classe : toute mise à
+    jour HACS, tout redémarrage de HA ou tout changement d'option le remettait donc à zéro, et le
+    journal s'arrêtait sans prévenir — en pleine campagne de mesure.
+
+    On restaure ici l'état précédent APRÈS cette réinitialisation (l'entité est ajoutée plus tard
+    dans la séquence de démarrage), et on réaligne le drapeau de classe dessus.
+    """
+
+    def __init__(self, manager: Any, uniqueid: str, onwrite: Any, value: bool) -> None:
+        self._manager = manager
+        super().__init__(manager, uniqueid, onwrite, None, None, value)
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        if (last := await self.async_get_last_state()) is not None:
+            on = last.state == "on"
+            self._attr_is_on = on
+            type(self._manager).simulation = on
+            _LOGGER.info("Simulation log restauré => %s", on)
 
 
 class SimulationLog:
@@ -46,7 +73,7 @@ class SimulationLog:
     def createEntities(self) -> None:
         """Switch LIVE (sans reload, en plus de l'option de config) + bouton de rotation."""
         m = self.manager
-        self.switch = ZendureSwitch(m, "simulation_log", self.update_switch, None, None, type(m).simulation)
+        self.switch = SimulationSwitch(m, "simulation_log", self.update_switch, type(m).simulation)
         self.button = ZendureButton(m, "simulation_rotate", self.rotate)
 
     async def update_switch(self, entity: ZendureSwitch, value: Any) -> None:

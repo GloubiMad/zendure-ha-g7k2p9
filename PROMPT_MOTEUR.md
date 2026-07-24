@@ -150,7 +150,7 @@ mesure. Avec un compteur à 2 s, le cycle réel devient 6 s ; à 1 s, il devient
 seuil « chemin rapide » à 2,2 s est **inatteignable** si les mesures arrivent toutes les
 2 s. Vérifie toujours la cadence réelle, pas la valeur théorique.
 
-### Grandeur pivot
+### Grandeur pivot — et son angle mort
 
 ```
 charge_maison = P1 + Σ(sorties_appareils)
@@ -158,8 +158,27 @@ charge_maison = P1 + Σ(sorties_appareils)
 
 Invariant censé être indépendant des batteries — mais **il ne l'est que partiellement** :
 mesuré, une variation de commande de 600-1200 W provoque un rebond de ~160 W sur cette
-grandeur au cycle suivant. Contamination faible mais réelle ; ne la traite pas comme un
-invariant parfait.
+grandeur au cycle suivant. Contamination faible mais réelle.
+
+⚠️ **Bien plus grave — cette grandeur peut mentir complètement.** Situation mesurée :
+
+```
+charge_maison = -62 W   (le moteur conclut : « maison équilibrée », régime repos)
+P1            = -749 W  (le compteur exporte 750 W depuis 3 minutes)
+```
+
+Les deux sont arithmétiquement cohérents : le moteur commandait 850 W de sortie à un
+producteur, cette sortie **entre dans le calcul de `charge_maison`**, et l'équilibre
+apparent est donc **fabriqué par la commande elle-même**. C'est le principe fondateur
+violé sur la grandeur pivot.
+
+Conséquence en cascade : le régime reste au repos, or le repos remet l'intégrateur à
+zéro — **la seule grandeur qui voit le problème (P1) est neutralisée toutes les quelques
+secondes**, et l'erreur peut durer indéfiniment.
+
+**Conception à retenir** : la machine à états ne doit pas décider sur `charge_maison`
+seul. Prévois un garde-fou sur **P1 directement** — si |P1| reste élevé alors que la
+grandeur pivot dit « équilibré », c'est la grandeur pivot qui a tort.
 
 ### Machine à états
 
@@ -224,7 +243,29 @@ attribuait 86 W (parfois 3 W) à un appareil, qui démarrait pour rien 95 % du t
 
 ---
 
-## 5. Architecture — deux règles
+## 5. Architecture — trois règles
+
+### Le même calcul ne doit exister qu'à UN endroit
+
+⚠️ **Piège mesuré, et le plus insidieux de tous.** La première implémentation avait deux
+branches (charge / repos-décharge) contenant chacune sa propre fonction de calcul de la
+capacité d'un puits — sous des **noms différents**, `chg_cap` et `chg_room`, ainsi que
+`spare` et `unused`. Un plafond de sécurité ajouté dans l'une n'existait pas dans l'autre.
+
+Résultat observé, à quelques secondes d'intervalle sur la même perturbation :
+
+```
+17:34:35  régime CHARGE   consigne du 2e puits  -323 W   <- plafond appliqué
+17:34:45  régime IDLE     consigne du 2e puits     0 W   <- plafond absent
+17:35:00  régime IDLE     consigne du 2e puits     0 W   <- 750 W exportés
+17:35:45  régime CHARGE   consigne du 2e puits  -471 W   <- ça remarche
+```
+
+Trois minutes d'export à 750 W, parce qu'un correctif ne couvrait qu'un régime sur deux.
+
+**Factorise toute règle de plafonnement dans une fonction unique**, appelée depuis chaque
+branche. Si tu dois vraiment dupliquer, écris un test qui vérifie que les deux chemins
+donnent le même résultat sur les mêmes entrées.
 
 ### Un seul chemin d'exécution
 
@@ -294,6 +335,11 @@ manquerait complètement les écarts de 125 W, qui sont pourtant sous le bruit a
 
 7. **Quand tu ne peux pas trancher, dis-le** et ajoute l'observabilité manquante. Ne
    produis pas une hypothèse de plus.
+
+8. **Après avoir corrigé, cherche le jumeau.** Chaque fois qu'un correctif a été posé sur
+   une branche, la même règle manquait ailleurs — trois fois de suite sur cette
+   implémentation. Avant de publier : `grep` le nom de la grandeur corrigée et vérifie
+   **tous** ses points d'usage.
 
 ---
 
