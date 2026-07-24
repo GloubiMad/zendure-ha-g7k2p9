@@ -90,8 +90,9 @@ class FondationNumber(ZendureRestoreNumber):
         seen = "None" if state is None else str(state.state)
         if state is None or state.state in (None, "unknown", "unavailable"):
             self._attr_native_value = self._default
-        if before != restored or restored != self._attr_native_value:
-            FondationNumber.trace.append(f"{name} init={before} parent={restored} 2e-lecture={seen} fin={self._attr_native_value}")
+        # On journalise TOUJOURS, y compris quand rien ne bouge : « le parent n'a rien restauré »
+        # est justement le résultat qu'on cherche à distinguer de « il a restauré puis on a écrasé ».
+        FondationNumber.trace.append(f"{name} init={before} parent={restored} 2e-lecture={seen} fin={self._attr_native_value}")
 
 
 class FondationEngine:
@@ -884,7 +885,11 @@ class FondationEngine:
             f" dwi{self.dwell_invert.asNumber} load{FondationEngine.loads}/{id(self) & 0xFFFF:04x}"
         )
         split = self._split()
-        if snap + split == self._par_prev:
+        # ⚠️ Le journal de restauration force l'émission. Sans ça il restait invisible : il se
+        # remplit APRÈS le premier cycle du moteur (les entités sont ajoutées dans une tâche, plus
+        # tard), et comme la restauration échoue les valeurs ne bougent pas — donc l'instantané ne
+        # changeait jamais et la ligne n'était jamais écrite. Bogue de la sonde du 24/07, 21h.
+        if snap + split == self._par_prev and not FondationNumber.trace:
             return ""
         self._par_prev = snap + split
         # Journal de restauration : écrit UNE fois puis vidé (il ne concerne que le chargement).
@@ -933,7 +938,12 @@ class FondationEngine:
             except (TypeError, ValueError):
                 pass  # "unknown"/"unavailable" : on signale aussi
             plat = getattr(getattr(ent, "_platform_state", None), "name", "?")
-            out.append(f"{name} moteur={ent.asNumber} ui={shown} plat={plat} id={id(ent) & 0xFFFF:04x}")
+            # `restored=True` = état FANTÔME fabriqué par Home Assistant à partir du registre pour
+            # une entité pas encore fournie, et non une valeur publiée par notre objet. Ça
+            # expliquerait le ui=700 impossible : personne ne l'aurait écrit, il survivrait au
+            # redémarrage parce qu'il vient du registre.
+            ghost = bool(st.attributes.get("restored")) if st is not None else False
+            out.append(f"{name} moteur={ent.asNumber} ui={shown} fantome={ghost} plat={plat} id={id(ent) & 0xFFFF:04x}")
         return " split=[" + " | ".join(out) + "]" if out else " split=[]"
 
     def _direct_control(self, devices, full_prod, base, ovh, p1, cmd, db_off, step, imax):
