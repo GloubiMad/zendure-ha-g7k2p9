@@ -117,37 +117,52 @@
         "name": "Target SoC"
       },
       "fondation_db_on": {
-        "name": "Fondation: engage threshold"
+        "name": "Engage threshold"
       },
       "fondation_db_off": {
-        "name": "Fondation: release threshold"
+        "name": "Release threshold"
       },
       "fondation_fast_track": {
-        "name": "Fondation: fast-track threshold"
+        "name": "Fast-track threshold"
       },
       "fondation_hl_alpha": {
-        "name": "Fondation: house load smoothing (alpha %)"
+        "name": "House load smoothing %"
+      },
+      "fondation_amt_alpha": {
+        "name": "Setpoint smoothing %"
       },
       "fondation_pv_alpha": {
-        "name": "Fondation: solar smoothing (alpha %)"
+        "name": "Solar smoothing %"
       },
       "fondation_step": {
-        "name": "Fondation: integrator step"
+        "name": "Integrator step"
       },
       "fondation_hyst_device": {
-        "name": "Fondation: device hysteresis"
+        "name": "Device hysteresis %"
       },
       "fondation_overhead": {
-        "name": "Fondation: inverter overhead"
+        "name": "Inverter overhead"
+      },
+      "fondation_min_engage": {
+        "name": "Producer engage floor"
+      },
+      "fondation_int_neg": {
+        "name": "Max negative integral"
+      },
+      "fondation_chg_probe": {
+        "name": "Charge probe margin"
       },
       "fondation_surplus_on": {
-        "name": "Fondation: surplus routing threshold (engage)"
+        "name": "Surplus routing: engage"
       },
       "fondation_surplus_off": {
-        "name": "Fondation: surplus routing threshold (release)"
+        "name": "Surplus routing: release"
       },
       "fondation_dwell_invert": {
-        "name": "Fondation: reversal dwell (cycles)"
+        "name": "Inversion dwell"
+      },
+      "fondation_slew": {
+        "name": "Setpoint slew-rate"
       }
     },
     "sensor": {

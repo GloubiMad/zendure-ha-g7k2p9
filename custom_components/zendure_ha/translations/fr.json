@@ -122,43 +122,55 @@
         "name": "SOC maximum"
       },
       "fondation_db_on": {
-        "name": "Fondation : seuil d'engagement"
+        "name": "Seuil d'engagement"
       },
       "fondation_db_off": {
-        "name": "Fondation : seuil de coupure"
+        "name": "Seuil de coupure"
       },
       "fondation_fast_track": {
-        "name": "Fondation : seuil fast-track"
+        "name": "Seuil fast-track"
       },
       "fondation_hl_alpha": {
-        "name": "Fondation : lissage house load (alpha %)"
+        "name": "Lissage house load %"
+      },
+      "fondation_amt_alpha": {
+        "name": "Lissage des consignes %"
       },
       "fondation_pv_alpha": {
-        "name": "Fondation : lissage solaire (alpha %)"
+        "name": "Lissage solaire %"
       },
       "fondation_step": {
-        "name": "Fondation : pas de l'intégrateur"
+        "name": "Pas de l'intégrateur"
       },
       "fondation_hyst_device": {
-        "name": "Fondation : hystérésis device"
+        "name": "Hystérésis device %"
       },
       "fondation_overhead": {
-        "name": "Fondation : overhead onduleur"
+        "name": "Overhead onduleur"
+      },
+      "fondation_min_engage": {
+        "name": "Engagement producteur"
+      },
+      "fondation_int_neg": {
+        "name": "Intégrale négative max"
+      },
+      "fondation_chg_probe": {
+        "name": "Sondage charge (marge)"
       },
       "fondation_surplus_on": {
-        "name": "Fondation : seuil routage surplus (engagement)"
+        "name": "Surplus : engagement"
       },
       "fondation_surplus_off": {
-        "name": "Fondation : seuil routage surplus (coupure)"
+        "name": "Surplus : coupure"
       },
       "fondation_dwell_invert": {
-        "name": "Fondation : dwell d’inversion (cycles)"
+        "name": "Dwell d'inversion"
       },
       "fondation_slew": {
-        "name": "Fondation : slew-rate consigne (W/cycle, 0=off)"
+        "name": "Slew-rate consigne"
       },
       "fondation_heartbeat": {
-        "name": "Fondation : battement régulation (s, 0=off)"
+        "name": "Battement régulation"
       }
     },
     "sensor": {
