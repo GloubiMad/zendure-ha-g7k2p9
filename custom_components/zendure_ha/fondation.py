@@ -69,6 +69,10 @@ class FondationNumber(ZendureRestoreNumber):
     def __init__(self, device: EntityDevice, uniqueid: str, default: int, minimum: int, maximum: int, uom: str | None = None) -> None:
         self._default = default
         super().__init__(device, uniqueid, None, None, uom, None, maximum, minimum, NumberMode.BOX, True)
+        # ⚠️ `super().__init__` se termine par `self.add([self])`, qui AJOUTE l'entité à Home
+        # Assistant. Tout ce qui suit cette ligne peut donc écraser une valeur déjà restaurée.
+        # On journalise l'état à ce point précis pour le prouver (24/07).
+        FondationNumber.trace.append(f"{uniqueid.replace('fondation_', '')} CTOR avant={self._attr_native_value} defaut={default} id={id(self) & 0xFFFF:04x}")
         self._attr_native_value = default
 
     # Journal de la restauration, vidé par `FondationEngine._params` dans simulation.csv.
@@ -92,7 +96,13 @@ class FondationNumber(ZendureRestoreNumber):
             self._attr_native_value = self._default
         # On journalise TOUJOURS, y compris quand rien ne bouge : « le parent n'a rien restauré »
         # est justement le résultat qu'on cherche à distinguer de « il a restauré puis on a écrasé ».
-        FondationNumber.trace.append(f"{name} init={before} parent={restored} 2e-lecture={seen} fin={self._attr_native_value}")
+        # `id` est LA pièce manquante : si elle coïncide avec celle que `split=` rapporte pour le
+        # même paramètre, alors l'objet restauré à 700 et l'objet qui applique 200 sont un seul et
+        # même objet — et la seule chose qui peut l'avoir écrasé entre les deux, c'est la fin de son
+        # propre constructeur, qui assigne la valeur par défaut APRÈS `self.add([self])`.
+        FondationNumber.trace.append(
+            f"{name} init={before} parent={restored} 2e-lecture={seen} fin={self._attr_native_value} id={id(self) & 0xFFFF:04x}"
+        )
 
 
 class FondationEngine:
