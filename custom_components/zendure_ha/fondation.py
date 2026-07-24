@@ -13,6 +13,11 @@ Principes (validés en simulation matérielle 13/13 + rejeu sur 25 traces réell
 
 TOUS les paramètres sont réglables à chaud (entités number du Manager, restaurées au redémarrage),
 pour pouvoir les faire varier selon la journée et automatiser leur réglage plus tard.
+
+⚠️ La restauration au redémarrage a été prise en défaut le 24/07/2026 : l'entité affichait la
+valeur réglée, le moteur appliquait le DÉFAUT. Rien n'est corrigé à ce stade — voir
+`FondationEngine._params`, le champ `par=` de simulation.csv, qui rend la config EFFECTIVE lisible
+et doit d'abord servir à caractériser le phénomène.
 """
 
 from __future__ import annotations
@@ -71,6 +76,9 @@ class FondationNumber(ZendureRestoreNumber):
         state = await self.async_get_last_state()
         if state is None or state.state in (None, "unknown", "unavailable"):
             self._attr_native_value = self._default
+        # ⚠️ Ce chemin de restauration est SOUPÇONNÉ (24/07) de ne pas atteindre la valeur que lit le
+        # moteur : voir `FondationEngine._params`. Rien n'est corrigé ici pour l'instant — on mesure
+        # d'abord, avec `par=` dans simulation.csv, avant d'ajouter quoi que ce soit.
 
 
 class FondationEngine:
@@ -103,6 +111,7 @@ class FondationEngine:
         self.cmd_target: dict[str, int] = {}
         self._cmd_ent: dict[str, object] = {}
         self.debug = ""                        # queue de ligne pour simulation.csv
+        self._par_prev = ""                    # dernier instantané des paramètres EFFECTIFS (cf. _params)
         # Comportement producteur plein : False=STORE (stocke le surplus dans les batteries, écrête
         # le reste) ; True=BLOCK (rien ne sort, maison sur réseau). Le mapping vers un mode gridReverse
         # sera câblé plus tard (#1 = nommer les modes). Défaut STORE (le cas utile, validé).
@@ -173,6 +182,7 @@ class FondationEngine:
     def createEntities(self) -> None:
         """Paramètres à chaud + capteurs d'observabilité, sur le device Manager."""
         m = self.manager
+        self._par_prev = ""  # force une ligne `par=` neuve à chaque (re)chargement de l'intégration
         self.db_on = FondationNumber(m, "fondation_db_on", 80, 40, 300, "W")
         self.db_off = FondationNumber(m, "fondation_db_off", 30, 10, 100, "W")
         self.fast_track = FondationNumber(m, "fondation_fast_track", 200, 100, 1000, "W")
@@ -821,11 +831,41 @@ class FondationEngine:
             f" acc={'/'.join(f'{int(self.chg_accept[d.deviceId])}' for d in devices if d.deviceId in self.chg_accept) or '-'}"
             f" liv={'/'.join(f'{int(self.prod_accept[d.deviceId])}' for d in devices if d.deviceId in self.prod_accept) or '-'}"
             f" strat={self.discharge_strategy.value}/{self.charge_strategy.value}"
+            f"{self._params()}"
         )
         _LOGGER.info(
             "Fondation => p1:%s house_load:%s regime:%s forced:%s integral:%s setpoint:%s",
             p1, int(hl_raw), self.regime.name, int(forced), int(self.integral), setpoint,
         )
+
+    def _params(self) -> str:
+        """Paramètres EFFECTIFS — ceux que le moteur applique vraiment, émis UNIQUEMENT s'ils changent.
+
+        Le CSV est le seul journal durable de cette installation (pas de home-assistant.log conservé).
+        Sans ce champ, un paramètre affiché dans HA mais non appliqué par le moteur est INDÉTECTABLE
+        autrement qu'en déduisant sa valeur du comportement — c'est ce qui a coûté quatre jours en
+        juillet 2026. On ne l'écrit qu'au changement : une ligne complète à chaque cycle
+        représenterait ~1,5 Mo par jour pour une information quasi constante.
+
+        ⚠️ C'est une SONDE, pas un correctif. Elle est posée en premier, seule, pour établir ce que
+        le moteur applique réellement en fonction de ce qu'on lui fait subir (redémarrage de HA,
+        rechargement de l'intégration, modification en direct depuis l'UI). Tant que ce comportement
+        n'est pas caractérisé, aucun contournement ne doit être écrit : le mécanisme de restauration
+        de `FondationNumber` est censé faire ce travail, et on ne sait pas encore pourquoi il échoue.
+        """
+        snap = (
+            f"db{self.db_on.asNumber}/{self.db_off.asNumber} ft{self.fast_track.asNumber}"
+            f" hla{self.hl_alpha.asNumber} amta{self.amt_alpha.asNumber} pva{self.pv_alpha.asNumber}"
+            f" stp{self.step.asNumber} hyd{self.hyst_device.asNumber} ovh{self.overhead.asNumber}"
+            f" slw{self.slew.asNumber} eng{self.min_engage.asNumber} ing{self.int_neg.asNumber}"
+            f" cpr{self.chg_probe.asNumber} sur{self.surplus_on.asNumber}/{self.surplus_off.asNumber}"
+            f" dwi{self.dwell_invert.asNumber}"
+        )
+        if snap == self._par_prev:
+            return ""
+        self._par_prev = snap
+        _LOGGER.warning("Fondation paramètres effectifs : %s", snap)
+        return f" par=[{snap}]"
 
     def _direct_control(self, devices, full_prod, base, ovh, p1, cmd, db_off, step, imax):
         """Producteur(s) plein(s) qui OBÉISSENT : on commande leur sortie = conso + charge encaissable,
