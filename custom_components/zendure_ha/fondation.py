@@ -470,7 +470,8 @@ class FondationEngine:
         # max/min). Sinon elle gonfle inutilement (1560 W observé terrain) et, quand la conso chute
         # d'un coup, met ~90 s à se vider = gros export transitoire. Gelée si saturé => la consigne
         # (feedforward) suit house_load instantanément. Validé en simu : pic 110 s -> 0, sans flip-flap.
-        # VIDANGE modérée (jusqu'à 2×step) sur l'écart opposé pour effacer tout résidu.
+        # VIDANGE : modérée (2×step) sur un import résiduel ; RAPIDE (proportionnelle à l'export) sur
+        # un EXPORT en décharge, où réagir vite prime (cf. correctif B étendu à la décharge, plus bas).
         step = self.step.asNumber
         imax = sum(d.discharge_limit for d in devices)
         sat_dis = house_net >= imax - db_on                             # déchargé à fond
@@ -481,7 +482,28 @@ class FondationEngine:
             if p1 > db_off and not sat_dis:
                 self.integral = min(self.integral + min(p1, step), imax)
             elif p1 < -db_off:
-                self.integral = max(0.0, self.integral - max(step, min(-p1, 2 * step)))
+                # CORRECTIF « B » ÉTENDU À LA DÉCHARGE (25/07) : sur un export, l'intégrale peut
+                # devenir NÉGATIVE (= « décharge moins »). Avant, plancher à 0 : quand la conso
+                # retombe plus vite que la boucle (expresso qui s'arrête, device qui revient en
+                # déversant), l'intégrale tapait 0 et seul le feed-forward house_load lissé faisait
+                # redescendre la décharge. Or house_load est AVEUGLE à un déversement autonome —
+                # la sortie de l'appareil s'ajoute dans house_load = P1 + Σhome, qui reste petit
+                # pendant qu'on exporte 1000 W. La SEULE mesure qui voit l'export, c'est P1 ;
+                # l'intégrale est la seule à en dépendre. Mesuré le 25/07 : retour en 32-35 s sur
+                # −1094/−1407 W, sans saturation du slew (0 %) → c'est bien ce plancher qui bloque.
+                #
+                # DESCENTE PROPORTIONNELLE à l'export (≠ montée, bridée à 2×step) : réduire une
+                # décharge qui part au réseau est urgent. À 2×step (60 W/cycle) il faudrait 15-25
+                # cycles sur un export franc — inutile. Ici l'intégrale peut suivre l'export en
+                # un cycle. ANTI-WINDUP `-dis_base` : elle ne descend pas sous ce qui annule la
+                # demande (demand = max(0,t_amt)+integral ≥ 0, jamais d'inversion via l'intégrale ;
+                # c'est le RÉGIME qui décide charge/décharge, pas elle). Plancher `int_neg`.
+                # int_neg = 0 → plancher à 0 = ancien comportement exact (désactivation propre).
+                floor = -self.int_neg.asNumber
+                dis_base = max(0.0, t_amt)
+                if self.integral > floor:
+                    self.integral = max(floor, self.integral - max(step, min(-p1, imax)))
+                    self.integral = max(self.integral, -dis_base)
         elif p1 < -db_off and not sat_chg:
             self.integral = min(self.integral + min(-p1, step), imax)
         elif p1 > db_off:
