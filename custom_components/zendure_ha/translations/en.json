@@ -162,7 +162,10 @@
         "name": "· Inversion dwell"
       },
       "fondation_slew": {
-        "name": "· Setpoint slew-rate"
+        "name": "· Slew-rate up (discharge)"
+      },
+      "fondation_slew_down": {
+        "name": "· Slew-rate down (0=unlimited)"
       }
     },
     "sensor": {

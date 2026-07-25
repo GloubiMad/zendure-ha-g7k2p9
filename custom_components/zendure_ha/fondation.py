@@ -275,10 +275,26 @@ class FondationEngine:
         self.sensor_forced = ZendureSensor(m, "fondation_forced", None, "W", "power", "measurement", 0)
         self.sensor_integral = ZendureSensor(m, "fondation_integral", None, "W", "power", "measurement", 0)
         self.sensor_setpoint = ZendureSensor(m, "fondation_setpoint", None, "W", "power", "measurement", 0)
-        # SLEW-RATE (C) : borne la vitesse de variation de la consigne d'un device (W par cycle) — anti
-        # overshoot sur transitoire (ex. up qui saute de -744 charge à +1012 décharge d'un coup -> export).
-        # Complémentaire du dwell (qui bloque l'INVERSION) : ici on RAMPE l'amplitude. 0 = désactivé.
+        # SLEW-RATE ASYMÉTRIQUE (« B1 ») : borne la vitesse de variation de la consigne d'un device
+        # (W par cycle). Complémentaire du dwell (qui bloque l'INVERSION) : ici on RAMPE l'amplitude.
+        #
+        # `slew` (MONTÉE, vers +) = vitesse max pour AUGMENTER une décharge. On la bride : sur-décharger
+        # sur un transitoire bref (micro-ondes 5 s) créerait un export au relâchement. Anti-overshoot.
+        #
+        # `slew_down` (DESCENTE, vers −) = vitesse max pour RÉDUIRE une décharge OU AUGMENTER une charge.
+        # Les deux réduisent l'export. Mesuré le 25/07 : sur un export de 1500 W (expresso qui s'arrête,
+        # glagla livre 1200 W de PV), le SolarFlow devait absorber ~1200 W mais `slew`=500 bridait sa
+        # commande à 500 W/cycle → 3 cycles pour engager le puits. L'export (surplus gaspillé au réseau)
+        # est plus grave que l'import (payé mais utile) ET réagir vite dans ce sens ne peut pas créer
+        # d'overshoot d'export. On libère donc la descente. 0 = illimité (défaut) : la commande atteint
+        # sa cible en un cycle, le device reste lissé par sa propre inertie (2-6 s mesurés).
+        # L'inversion charge↔décharge reste protégée par `dwell_invert`, donc pas de flip-flop.
+        #
+        # DÉFAUT = slew (500) => descente = montée = SYMÉTRIQUE = comportement historique EXACT :
+        # B1 est livré INACTIF, on l'active en réglant `slew_down` (0 = illimité) depuis l'UI, pour
+        # comparer avant/après soi-même. Une modif réversible, activée volontairement.
         self.slew = FondationNumber(m, "fondation_slew", 500, 0, 1200, "W")
+        self.slew_down = FondationNumber(m, "fondation_slew_down", 500, 0, 1200, "W")
 
     def createDeviceEntities(self) -> None:
         """Capteur de consigne par onduleur. À appeler APRÈS le chargement des devices.
@@ -846,15 +862,19 @@ class FondationEngine:
                     self.dir_pend[d.deviceId] = 0
                 self.dir_prev[d.deviceId] = cmd[d]
 
-        # --- SLEW-RATE : rampe l'amplitude de la consigne (W/cycle) par rapport à la dernière appliquée.
-        # Avec le battement (cycles réguliers ~2-3 s), ça borne la vitesse réelle et écrête les overshoots
-        # de transitoire. 0 = désactivé. N'empêche pas l'inversion (c'est le rôle du dwell) mais la lisse.
-        slew = int(self.slew.asNumber)
-        if slew > 0:
-            for d in devices:
-                prev = self.cmd_applied.get(d.deviceId)
-                if prev is not None:
-                    cmd[d] = max(prev - slew, min(prev + slew, cmd[d]))
+        # --- SLEW-RATE ASYMÉTRIQUE : rampe l'amplitude de la consigne (W/cycle) vs la dernière appliquée.
+        # MONTÉE (vers + = plus de décharge) bridée par `slew` (anti-overshoot d'export sur transitoire
+        # bref). DESCENTE (vers − = moins de décharge / plus de charge, donc RÉDUIRE l'export) bridée par
+        # `slew_down`, plus rapide voire illimitée (0). N'empêche pas l'inversion (rôle du dwell).
+        slew_up = int(self.slew.asNumber)
+        slew_dn = int(self.slew_down.asNumber)
+        for d in devices:
+            prev = self.cmd_applied.get(d.deviceId)
+            if prev is None:
+                continue
+            hi = prev + slew_up if slew_up > 0 else float("inf")   # plafond de MONTÉE
+            lo = prev - slew_dn if slew_dn > 0 else float("-inf")  # plancher de DESCENTE (0 = illimité)
+            cmd[d] = max(lo, min(hi, cmd[d]))
 
         # --- application (gardes reprises du moteur 1.4.2 : bypass non stoppé, offgrid maintenu) ---
         setpoint = 0
@@ -924,7 +944,7 @@ class FondationEngine:
             f"db{self.db_on.asNumber}/{self.db_off.asNumber} ft{self.fast_track.asNumber}"
             f" hla{self.hl_alpha.asNumber} amta{self.amt_alpha.asNumber} pva{self.pv_alpha.asNumber}"
             f" stp{self.step.asNumber} hyd{self.hyst_device.asNumber} ovh{self.overhead.asNumber}"
-            f" slw{self.slew.asNumber} eng{self.min_engage.asNumber} ing{self.int_neg.asNumber}"
+            f" slw{self.slew.asNumber}/{self.slew_down.asNumber} eng{self.min_engage.asNumber} ing{self.int_neg.asNumber}"
             f" cpr{self.chg_probe.asNumber} sur{self.surplus_on.asNumber}/{self.surplus_off.asNumber}"
             f" dwi{self.dwell_invert.asNumber} load{FondationEngine.loads}/{id(self) & 0xFFFF:04x}"
         )
@@ -948,8 +968,8 @@ class FondationEngine:
             ("db_on", self.db_on), ("db_off", self.db_off), ("ft", self.fast_track),
             ("hl_a", self.hl_alpha), ("amt_a", self.amt_alpha), ("pv_a", self.pv_alpha),
             ("step", self.step), ("hyst", self.hyst_device), ("ovh", self.overhead),
-            ("slew", self.slew), ("eng", self.min_engage), ("int_neg", self.int_neg),
-            ("chg_probe", self.chg_probe), ("sur_on", self.surplus_on),
+            ("slew", self.slew), ("slew_dn", self.slew_down), ("eng", self.min_engage),
+            ("int_neg", self.int_neg), ("chg_probe", self.chg_probe), ("sur_on", self.surplus_on),
             ("sur_off", self.surplus_off), ("dwell", self.dwell_invert),
         ]
 

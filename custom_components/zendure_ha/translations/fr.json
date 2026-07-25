@@ -167,7 +167,10 @@
         "name": "· Dwell d'inversion"
       },
       "fondation_slew": {
-        "name": "· Slew-rate consigne"
+        "name": "· Slew-rate montée (décharge)"
+      },
+      "fondation_slew_down": {
+        "name": "· Slew-rate descente (0=illimité)"
       },
       "fondation_heartbeat": {
         "name": "· Battement régulation"
