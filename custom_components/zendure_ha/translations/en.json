@@ -161,6 +161,9 @@
       "fondation_dwell_sec": {
         "name": "· Inversion dwell (s)"
       },
+      "fondation_sf_dismax": {
+        "name": "· SolarFlow discharge max (0=auto)"
+      },
       "fondation_slew": {
         "name": "· Slew-rate up (discharge)"
       },

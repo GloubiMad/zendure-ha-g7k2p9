@@ -29,7 +29,7 @@ from time import perf_counter
 from homeassistant.components.number import NumberMode
 
 from .const import DeviceState, ManagerState
-from .device import ZendureDevice
+from .device import ZendureDevice, ZendureZenSdk
 from .entity import EntityDevice
 from .number import ZendureRestoreNumber
 from .select import ZendureRestoreSelect
@@ -269,6 +269,13 @@ class FondationEngine:
         # comportement historique à la cadence courante, désormais STABLE quand la cadence change.
         # (Ancienne entité `fondation_dwell_invert`, en cycles, retirée : elle devient orpheline.)
         self.dwell_sec = FondationNumber(m, "fondation_dwell_sec", 8, 0, 30, "s")
+        # DÉBRIDAGE de la limite de décharge d'un SolarFlow (ZenSdk). Le SolarFlow 2400 s'init à
+        # 2400 W mais rapporte parfois inverseMaxPower=1200 (device.py:256 rabaisse alors discharge_limit
+        # à la moitié) → le moteur ne commandait que 1200 W et importait pendant les pics couvrables.
+        # On ré-impose ici la vraie capacité, À CHAQUE cycle (inverseMaxPower la rabaisse entre-temps).
+        # 0 = OFF (défaut, aucun changement). ⚠️ On NE se fie PAS à cette valeur : le dérating THERMIQUE
+        # éventuel est rattrapé par la MESURE (P1 → intégrale → bascule sur up), jamais par ce nombre.
+        self.sf_dismax = FondationNumber(m, "fondation_sf_dismax", 0, 0, 3000, "W")
         # Stratégies de répartition (n'agissent qu'en mode smart_fondation ; le « combien » reste commun).
         # Validées au banc sur 25 traces réelles : hysteresis/wide saines ; fixed_order OK avec l'hystérésis
         # de plancher ; parallel = 0 permutation mais + de grid-charge transitoire sous bruit (expérimental).
@@ -333,6 +340,17 @@ class FondationEngine:
         devices: list[ZendureDevice] = [d for d in self.manager.devices if d.state != DeviceState.OFFLINE and getattr(d, "fuseGrp", None) is not None]
         if not devices:
             return
+
+        # DÉBRIDAGE SolarFlow (cf. déclaration du paramètre) : ré-imposé À CHAQUE cycle car un message
+        # inverseMaxPower peut avoir rabaissé discharge_limit entre-temps. On force les DEUX bornes que
+        # le moteur utilise : discharge_limit (aussi le clamp de power_discharge) ET fuseGrp.maxpower
+        # (le fusegroup solo plafonne à min(maxpower, discharge_limit)). max() = on n'élargit jamais
+        # au-dessus de la valeur demandée, on ne rétrécit pas un fusegroup multi-device légitime.
+        if (sf_dis := int(self.sf_dismax.asNumber)) > 0:
+            for d in devices:
+                if isinstance(d, ZendureZenSdk):
+                    d.discharge_limit = sf_dis
+                    d.fuseGrp.maxpower = max(d.fuseGrp.maxpower, sf_dis)
 
         now = datetime.now()
 
@@ -978,7 +996,7 @@ class FondationEngine:
             f" stp{self.step.asNumber} hyd{self.hyst_device.asNumber} ovh{self.overhead.asNumber}"
             f" slw{self.slew.asNumber}/{self.slew_down.asNumber} eng{self.min_engage.asNumber} ing{self.int_neg.asNumber}"
             f" cpr{self.chg_probe.asNumber} sur{self.surplus_on.asNumber}/{self.surplus_off.asNumber}"
-            f" dws{self.dwell_sec.asNumber} tf{self.timefast.asNumber}/{self.timezero.asNumber}"
+            f" dws{self.dwell_sec.asNumber} sfd{self.sf_dismax.asNumber} tf{self.timefast.asNumber}/{self.timezero.asNumber}"
             f" load{FondationEngine.loads}/{id(self) & 0xFFFF:04x}"
         )
         split = self._split()
@@ -1004,7 +1022,7 @@ class FondationEngine:
             ("slew", self.slew), ("slew_dn", self.slew_down), ("eng", self.min_engage),
             ("int_neg", self.int_neg), ("chg_probe", self.chg_probe), ("sur_on", self.surplus_on),
             ("sur_off", self.surplus_off), ("dwell", self.dwell_sec),
-            ("timefast", self.timefast), ("timezero", self.timezero),
+            ("sf_dismax", self.sf_dismax), ("timefast", self.timefast), ("timezero", self.timezero),
         ]
 
     def _split(self) -> str:
