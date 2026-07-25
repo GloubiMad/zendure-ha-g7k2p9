@@ -149,6 +149,7 @@ class FondationEngine:
         self._cmd_ent: dict[str, object] = {}
         self.debug = ""                        # queue de ligne pour simulation.csv
         self._par_prev = ""                    # dernier instantané des paramètres EFFECTIFS (cf. _params)
+        self._imp_written: dict[str, datetime] = {}  # dernier envoi inverseMaxPower par device (anti-flash)
         # Comportement producteur plein : False=STORE (stocke le surplus dans les batteries, écrête
         # le reste) ; True=BLOCK (rien ne sort, maison sur réseau). Le mapping vers un mode gridReverse
         # sera câblé plus tard (#1 = nommer les modes). Défaut STORE (le cas utile, validé).
@@ -341,18 +342,29 @@ class FondationEngine:
         if not devices:
             return
 
-        # DÉBRIDAGE SolarFlow (cf. déclaration du paramètre) : ré-imposé À CHAQUE cycle car un message
-        # inverseMaxPower peut avoir rabaissé discharge_limit entre-temps. On force les DEUX bornes que
-        # le moteur utilise : discharge_limit (aussi le clamp de power_discharge) ET fuseGrp.maxpower
-        # (le fusegroup solo plafonne à min(maxpower, discharge_limit)). max() = on n'élargit jamais
-        # au-dessus de la valeur demandée, on ne rétrécit pas un fusegroup multi-device légitime.
+        now = datetime.now()
+
+        # DÉBRIDAGE SolarFlow (cf. déclaration du paramètre). DEUX niveaux :
+        # 1) VUE INTERNE du moteur, ré-imposée à chaque cycle (un message inverseMaxPower a pu rabaisser
+        #    discharge_limit entre-temps) : discharge_limit (aussi le clamp de power_discharge) ET
+        #    fuseGrp.maxpower (le fusegroup solo plafonne à min(maxpower, discharge_limit)).
+        # 2) LE DEVICE lui-même : le cloud lui re-pousse périodiquement inverseMaxPower=1200 (le HEMS
+        #    l'éviterait mais entrerait en conflit avec l'intégration). Débrider la seule vue interne ne
+        #    sert à rien si le device plafonne sa sortie réelle. On RÉ-ÉCRIT donc inverseMaxPower sur le
+        #    device quand il le rapporte sous la cible — RÉACTIF + throttle 60 s (cette propriété peut
+        #    aller en flash ; l'écrire à chaque cycle l'userait). Le dérating THERMIQUE reste géré par
+        #    la mesure : on lève la limite arbitraire du cloud, pas la protection thermique du device.
         if (sf_dis := int(self.sf_dismax.asNumber)) > 0:
             for d in devices:
                 if isinstance(d, ZendureZenSdk):
                     d.discharge_limit = sf_dis
                     d.fuseGrp.maxpower = max(d.fuseGrp.maxpower, sf_dis)
-
-        now = datetime.now()
+                    imp = d.entities.get("inverseMaxPower")
+                    if imp is not None and getattr(imp, "asInt", sf_dis) < sf_dis:
+                        last = self._imp_written.get(d.deviceId)
+                        if last is None or (now - last).total_seconds() > 60:
+                            self._imp_written[d.deviceId] = now
+                            await d.doCommand({"properties": {"inverseMaxPower": sf_dis}})
 
         # --- diagnostic : AVANT de recalculer, on confronte la mesure courante à la consigne
         # encore en vigueur. Ne corrige rien, se contente de nommer un device qui n'obéit pas.
