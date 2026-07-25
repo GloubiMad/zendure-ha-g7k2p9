@@ -348,12 +348,14 @@ class FondationEngine:
         # 1) VUE INTERNE du moteur, ré-imposée à chaque cycle (un message inverseMaxPower a pu rabaisser
         #    discharge_limit entre-temps) : discharge_limit (aussi le clamp de power_discharge) ET
         #    fuseGrp.maxpower (le fusegroup solo plafonne à min(maxpower, discharge_limit)).
-        # 2) LE DEVICE lui-même : le cloud lui re-pousse périodiquement inverseMaxPower=1200 (le HEMS
-        #    l'éviterait mais entrerait en conflit avec l'intégration). Débrider la seule vue interne ne
-        #    sert à rien si le device plafonne sa sortie réelle. On RÉ-ÉCRIT donc inverseMaxPower sur le
-        #    device quand il le rapporte sous la cible — RÉACTIF + throttle 60 s (cette propriété peut
-        #    aller en flash ; l'écrire à chaque cycle l'userait). Le dérating THERMIQUE reste géré par
-        #    la mesure : on lève la limite arbitraire du cloud, pas la protection thermique du device.
+        # 2) LE DEVICE lui-même : le cloud lui re-pousse inverseMaxPower (~800 W) TOUTES LES ~6 s, vu
+        #    sur le MQTT (le HEMS l'éviterait mais entrerait en conflit avec l'intégration). Débrider la
+        #    seule vue interne ne sert à rien si le device plafonne sa sortie réelle. On RÉ-ÉCRIT donc
+        #    inverseMaxPower sur le device quand il le rapporte sous la cible — throttle 5 s pour suivre
+        #    le cloud (6 s) sans spammer. Le fait que le cloud réécrive à 6 s prouve que la propriété est
+        #    VOLATILE (RAM), pas du flash : la réécrire souvent est donc sans risque d'usure.
+        #    Le dérating THERMIQUE reste géré par la mesure : on lève la limite arbitraire du cloud, pas
+        #    la protection thermique du device.
         if (sf_dis := int(self.sf_dismax.asNumber)) > 0:
             for d in devices:
                 if isinstance(d, ZendureZenSdk):
@@ -362,7 +364,7 @@ class FondationEngine:
                     imp = d.entities.get("inverseMaxPower")
                     if imp is not None and getattr(imp, "asInt", sf_dis) < sf_dis:
                         last = self._imp_written.get(d.deviceId)
-                        if last is None or (now - last).total_seconds() > 60:
+                        if last is None or (now - last).total_seconds() > 5:
                             self._imp_written[d.deviceId] = now
                             await d.doCommand({"properties": {"inverseMaxPower": sf_dis}})
 
