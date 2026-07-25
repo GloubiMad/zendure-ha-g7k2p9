@@ -163,8 +163,8 @@
       "fondation_surplus_off": {
         "name": "· Surplus : coupure"
       },
-      "fondation_dwell_invert": {
-        "name": "· Dwell d'inversion"
+      "fondation_dwell_sec": {
+        "name": "· Dwell d'inversion (s)"
       },
       "fondation_slew": {
         "name": "· Slew-rate montée (décharge)"

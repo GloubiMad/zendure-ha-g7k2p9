@@ -141,7 +141,7 @@ class FondationEngine:
         self.floor: dict[str, bool] = {}       # hystérésis de plancher SoC (sticky jusqu'à minSoc+3)
         self.surplus_active = False            # hystérésis du routage de surplus solaire (anti flip-flap)
         self.dir_prev: dict[str, float] = {}   # dernière consigne appliquée (dwell d'inversion)
-        self.dir_pend: dict[str, int] = {}     # cycles consécutifs de signe opposé demandé
+        self.dir_since: dict[str, datetime | None] = {}  # instant du 1er cycle d'inversion demandée (dwell en SECONDES)
         self.cmd_applied: dict[str, int] = {}  # dernière consigne RÉELLEMENT appliquée (slew-rate)
         # Consigne envoyée au device (signée : + décharge / − charge). Lue par simulation.csv et par
         # le watchdog (choix d'une commande de réveil DIFFÉRENTE). Vit ici : c'est le moteur qui commande.
@@ -260,11 +260,15 @@ class FondationEngine:
         self.chg_probe = FondationNumber(m, "fondation_chg_probe", 150, 50, 3000, "W")
         self.surplus_on = FondationNumber(m, "fondation_surplus_on", 300, 50, 1500, "W")
         self.surplus_off = FondationNumber(m, "fondation_surplus_off", 150, 20, 1200, "W")
-        # Dwell d'INVERSION (nb de cycles) : une batterie ne passe pas charge<->décharge sur un
+        # Dwell d'INVERSION (en SECONDES) : une batterie ne passe pas charge<->décharge sur un
         # transitoire court (micro-ondes, résistance) — elle garde sa consigne tant que le signe
-        # opposé n'a pas persisté. Évite de fabriquer un export en réagissant un cycle trop tard.
-        # 0 = désactivé. Réglable à chaud (ex. automation : lave-linge ON -> monter le dwell).
-        self.dwell_invert = FondationNumber(m, "fondation_dwell_invert", 3, 0, 10, None)
+        # opposé n'a pas persisté `dwell_sec` secondes. Évite de fabriquer un export en réagissant
+        # un cycle trop tard. 0 = désactivé. Réglable à chaud (ex. automation : lave-linge ON -> monter).
+        # ⚠️ Exprimé en TEMPS (25/07), plus en cycles : le compteur de cycles dérivait avec la cadence
+        # (timefast/timezero) — 3 cycles valaient 13,5 s à 4,5 s de cadence, 8,1 s à 2,7 s. Défaut 8 s =
+        # comportement historique à la cadence courante, désormais STABLE quand la cadence change.
+        # (Ancienne entité `fondation_dwell_invert`, en cycles, retirée : elle devient orpheline.)
+        self.dwell_sec = FondationNumber(m, "fondation_dwell_sec", 8, 0, 30, "s")
         # Stratégies de répartition (n'agissent qu'en mode smart_fondation ; le « combien » reste commun).
         # Validées au banc sur 25 traces réelles : hysteresis/wide saines ; fixed_order OK avec l'hystérésis
         # de plancher ; parallel = 0 permutation mais + de grid-charge transitoire sous bruit (expérimental).
@@ -289,7 +293,7 @@ class FondationEngine:
         # est plus grave que l'import (payé mais utile) ET réagir vite dans ce sens ne peut pas créer
         # d'overshoot d'export. On libère donc la descente. 0 = illimité (défaut) : la commande atteint
         # sa cible en un cycle, le device reste lissé par sa propre inertie (2-6 s mesurés).
-        # L'inversion charge↔décharge reste protégée par `dwell_invert`, donc pas de flip-flop.
+        # L'inversion charge↔décharge reste protégée par `dwell_sec`, donc pas de flip-flop.
         #
         # DÉFAUT = slew (500) => descente = montée = SYMÉTRIQUE = comportement historique EXACT :
         # B1 est livré INACTIF, on l'active en réglant `slew_down` (0 = illimité) depuis l'UI, pour
@@ -860,24 +864,29 @@ class FondationEngine:
         # Fin du CALCUL, début de la préparation + I/O (envoi des consignes plus bas).
         self._ms_calc = (perf_counter() - self._t0) * 1000.0
         t_io = perf_counter()
-        # --- DWELL D'INVERSION : pas de charge<->décharge sur un transitoire court ---
-        # Une charge qui pulse ~5 s (micro-ondes en décongélation, résistance) est plus rapide que le
-        # cycle du moteur : la correction arrive quand l'impulsion est finie -> on FABRIQUE un export
-        # (mesuré terrain : 59 % de l'export exporté l'était pendant que up déchargeait, 28 inversions
-        # en 10 min). On garde donc la consigne courante tant que le signe opposé n'a pas persisté.
-        dwell = int(self.dwell_invert.asNumber)
-        if dwell > 0:
+        # --- DWELL D'INVERSION (en SECONDES) : pas de charge<->décharge sur un transitoire court ---
+        # Une charge qui pulse ~5-10 s (micro-ondes en décongélation, résistance) est plus rapide que
+        # la boucle : la correction arrive quand l'impulsion est finie -> on FABRIQUE un export (mesuré
+        # terrain : 59 % de l'export l'était pendant que up déchargeait, 28 inversions en 10 min). On
+        # tient donc la consigne courante tant que le signe opposé n'a pas persisté `dwell_sec` secondes.
+        # DÉLAI EN TEMPS (et non en cycles) : on mémorise l'INSTANT de la première demande d'inversion,
+        # ce qui rend le comportement indépendant de la cadence (cf. la déclaration du paramètre).
+        dwell_s = self.dwell_sec.asNumber
+        if dwell_s > 0:
+            now_d = datetime.now()
             for d in devices:
                 prev = self.dir_prev.get(d.deviceId, 0.0)
                 if prev * cmd[d] < 0:  # inversion demandée
-                    pend = self.dir_pend.get(d.deviceId, 0) + 1
-                    if pend < dwell:
-                        cmd[d] = prev  # on tient la consigne courante
-                        self.dir_pend[d.deviceId] = pend
+                    since = self.dir_since.get(d.deviceId)
+                    if since is None:
+                        self.dir_since[d.deviceId] = now_d
+                        cmd[d] = prev  # on tient la consigne courante (début du dwell)
+                    elif (now_d - since).total_seconds() < dwell_s:
+                        cmd[d] = prev  # on tient encore
                     else:
-                        self.dir_pend[d.deviceId] = 0
+                        self.dir_since[d.deviceId] = None  # délai écoulé -> inversion autorisée
                 else:
-                    self.dir_pend[d.deviceId] = 0
+                    self.dir_since[d.deviceId] = None
                 self.dir_prev[d.deviceId] = cmd[d]
 
         # --- SLEW-RATE ASYMÉTRIQUE : rampe l'amplitude de la consigne (W/cycle) vs la dernière appliquée.
@@ -969,7 +978,7 @@ class FondationEngine:
             f" stp{self.step.asNumber} hyd{self.hyst_device.asNumber} ovh{self.overhead.asNumber}"
             f" slw{self.slew.asNumber}/{self.slew_down.asNumber} eng{self.min_engage.asNumber} ing{self.int_neg.asNumber}"
             f" cpr{self.chg_probe.asNumber} sur{self.surplus_on.asNumber}/{self.surplus_off.asNumber}"
-            f" dwi{self.dwell_invert.asNumber} tf{self.timefast.asNumber}/{self.timezero.asNumber}"
+            f" dws{self.dwell_sec.asNumber} tf{self.timefast.asNumber}/{self.timezero.asNumber}"
             f" load{FondationEngine.loads}/{id(self) & 0xFFFF:04x}"
         )
         split = self._split()
@@ -994,7 +1003,7 @@ class FondationEngine:
             ("step", self.step), ("hyst", self.hyst_device), ("ovh", self.overhead),
             ("slew", self.slew), ("slew_dn", self.slew_down), ("eng", self.min_engage),
             ("int_neg", self.int_neg), ("chg_probe", self.chg_probe), ("sur_on", self.surplus_on),
-            ("sur_off", self.surplus_off), ("dwell", self.dwell_invert),
+            ("sur_off", self.surplus_off), ("dwell", self.dwell_sec),
             ("timefast", self.timefast), ("timezero", self.timezero),
         ]
 

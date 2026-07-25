@@ -158,8 +158,8 @@
       "fondation_surplus_off": {
         "name": "· Surplus routing: release"
       },
-      "fondation_dwell_invert": {
-        "name": "· Inversion dwell"
+      "fondation_dwell_sec": {
+        "name": "· Inversion dwell (s)"
       },
       "fondation_slew": {
         "name": "· Slew-rate up (discharge)"
