@@ -166,6 +166,12 @@
       },
       "fondation_slew_down": {
         "name": "· Slew-rate down (0=unlimited)"
+      },
+      "fondation_timefast": {
+        "name": "· Min cadence transient (ms)"
+      },
+      "fondation_timezero": {
+        "name": "· Min cadence steady (ms)"
       }
     },
     "sensor": {

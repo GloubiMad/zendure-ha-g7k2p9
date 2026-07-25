@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from time import perf_counter
 
 from homeassistant.components.number import NumberMode
 
@@ -295,6 +296,16 @@ class FondationEngine:
         # comparer avant/après soi-même. Une modif réversible, activée volontairement.
         self.slew = FondationNumber(m, "fondation_slew", 500, 0, 1200, "W")
         self.slew_down = FondationNumber(m, "fondation_slew_down", 500, 0, 1200, "W")
+        # Cadence du moteur (en ms). Ces deux valeurs bridaient le déclenchement en AMONT via des
+        # constantes en dur (SmartMode.TIMEFAST/TIMEZERO) partagées avec le moteur smart-matching :
+        #   - `timezero` (4000) : intervalle MINIMUM entre deux calculs, même si P1 est stable ;
+        #   - `timefast` (2200) : fenêtre après un calcul pendant laquelle AUCUN nouveau calcul n'a
+        #     lieu (les P1 sont accumulés puis ignorés) — c'est un plancher, PAS lié à la fréquence
+        #     du Shelly. Baisser ces valeurs accélère la boucle, à condition que le temps mort
+        #     (commande → P1 réagit) et le temps de cycle (cf. champ `ms=` du debug) le permettent.
+        # En mode fondation, `manager._p1_changed` lit CES valeurs au lieu des constantes amont.
+        self.timefast = FondationNumber(m, "fondation_timefast", 2200, 300, 10000, "ms")
+        self.timezero = FondationNumber(m, "fondation_timezero", 4000, 300, 10000, "ms")
 
     def createDeviceEntities(self) -> None:
         """Capteur de consigne par onduleur. À appeler APRÈS le chargement des devices.
@@ -309,6 +320,10 @@ class FondationEngine:
 
     async def update(self, p1: int) -> None:
         """Un cycle de régulation. Appelé par powerChanged quand operation == FONDATION."""
+        # CHRONO : temps de CALCUL pur (jusqu'à _apply_and_report) vs temps d'I/O (envoi des
+        # commandes). Répond à « d'où viennent les ~600 ms ? » : le calcul doit être <10 ms, l'I/O
+        # (httpGet du SolarFlow en amont + envoi des consignes) est le vrai coût. Affiché dans `ms=`.
+        self._t0 = perf_counter()
         # fuseGrp n'est pas assigné pour un device hors fusegroup (annotation sans valeur
         # dans device.py) -> l'exclure du moteur au lieu de crasher sur les caps.
         devices: list[ZendureDevice] = [d for d in self.manager.devices if d.state != DeviceState.OFFLINE and getattr(d, "fuseGrp", None) is not None]
@@ -842,6 +857,9 @@ class FondationEngine:
         await self._apply_and_report(devices, cmd, hl_raw, forced, t_raw, t_reg, p1)
 
     async def _apply_and_report(self, devices, cmd, hl_raw, forced, t_raw, t_reg, p1) -> None:
+        # Fin du CALCUL, début de la préparation + I/O (envoi des consignes plus bas).
+        self._ms_calc = (perf_counter() - self._t0) * 1000.0
+        t_io = perf_counter()
         # --- DWELL D'INVERSION : pas de charge<->décharge sur un transitoire court ---
         # Une charge qui pulse ~5 s (micro-ondes en décongélation, résistance) est plus rapide que le
         # cycle du moteur : la correction arrive quand l'impulsion est finie -> on FABRIQUE un export
@@ -910,6 +928,11 @@ class FondationEngine:
         self.sensor_setpoint.update_value(setpoint)
         self.manager.operationstate.update_value(self.regime.value)
         self.manager.setpoint = setpoint
+        # CHRONO : calc = calcul pur du moteur ; io = envoi des consignes (I/O) ; cyc = cycle
+        # complet mesuré côté manager (inclut le httpGet du SolarFlow, donc get ≈ cyc − calc − io).
+        # `cyc` a un cycle de retard (mesuré après le retour de update). Tous en ms, arrondis.
+        ms_io = (perf_counter() - t_io) * 1000.0
+        ms = f" ms={getattr(self.manager, 'ms_cycle', 0.0):.0f}cyc/{self._ms_calc:.1f}calc/{ms_io:.1f}io"
         self.debug = (
             f"fondation regime={self.regime.name} hl={int(hl_raw)} forced={int(forced)} T={int(t_raw)}"
             f" ema={int(t_reg)} amt={int(self.amt_ema) if self.amt_ema is not None else 0}"
@@ -917,7 +940,7 @@ class FondationEngine:
             f" prod={'/'.join(f'{int(self.drain_ema.get(d.deviceId, 0))}' for d in devices if self._is_producer(d, datetime.now())) or '-'}"
             f" acc={'/'.join(f'{int(self.chg_accept[d.deviceId])}' for d in devices if d.deviceId in self.chg_accept) or '-'}"
             f" liv={'/'.join(f'{int(self.prod_accept[d.deviceId])}' for d in devices if d.deviceId in self.prod_accept) or '-'}"
-            f" strat={self.discharge_strategy.value}/{self.charge_strategy.value}"
+            f" strat={self.discharge_strategy.value}/{self.charge_strategy.value}{ms}"
             f"{self._params()}"
         )
         _LOGGER.info(
@@ -946,7 +969,8 @@ class FondationEngine:
             f" stp{self.step.asNumber} hyd{self.hyst_device.asNumber} ovh{self.overhead.asNumber}"
             f" slw{self.slew.asNumber}/{self.slew_down.asNumber} eng{self.min_engage.asNumber} ing{self.int_neg.asNumber}"
             f" cpr{self.chg_probe.asNumber} sur{self.surplus_on.asNumber}/{self.surplus_off.asNumber}"
-            f" dwi{self.dwell_invert.asNumber} load{FondationEngine.loads}/{id(self) & 0xFFFF:04x}"
+            f" dwi{self.dwell_invert.asNumber} tf{self.timefast.asNumber}/{self.timezero.asNumber}"
+            f" load{FondationEngine.loads}/{id(self) & 0xFFFF:04x}"
         )
         split = self._split()
         # ⚠️ Le journal de restauration force l'émission. Sans ça il restait invisible : il se
@@ -971,6 +995,7 @@ class FondationEngine:
             ("slew", self.slew), ("slew_dn", self.slew_down), ("eng", self.min_engage),
             ("int_neg", self.int_neg), ("chg_probe", self.chg_probe), ("sur_on", self.surplus_on),
             ("sur_off", self.surplus_off), ("dwell", self.dwell_invert),
+            ("timefast", self.timefast), ("timezero", self.timezero),
         ]
 
     def _split(self) -> str:

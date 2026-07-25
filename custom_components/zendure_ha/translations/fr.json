@@ -172,6 +172,12 @@
       "fondation_slew_down": {
         "name": "· Slew-rate descente (0=illimité)"
       },
+      "fondation_timefast": {
+        "name": "· Cadence min transitoire (ms)"
+      },
+      "fondation_timezero": {
+        "name": "· Cadence min régime (ms)"
+      },
       "fondation_heartbeat": {
         "name": "· Battement régulation"
       }

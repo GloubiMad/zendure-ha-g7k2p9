@@ -11,6 +11,7 @@ from collections import deque
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from math import sqrt
+from time import perf_counter
 from pathlib import Path
 from typing import Any
 
@@ -101,6 +102,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
         self.sim = SimulationLog(self)
         self.diag = EngineDiagnostic(self)
         self.setpoint = 0  # dernier setpoint du moteur actif (observabilité simulation.csv)
+        self.ms_cycle = 0.0  # durée du dernier cycle powerChanged (ms), pour le champ `ms=` fondation
 
     async def loadDevices(self) -> None:
         if self.config_entry is None or (data := await Api.Connect(self.hass, dict(self.config_entry.data), True)) is None:
@@ -405,14 +407,24 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                 self.produced = 0
                 for fg in self.fuseGroups:
                     fg.initPower = True
+                # CHRONO du cycle complet (inclut power_get -> httpGet SolarFlow). Lu par le moteur
+                # fondation pour son champ `ms=` (diagnostic du temps de traitement, 25/07).
+                _t = perf_counter()
                 await self.powerChanged(p1, isFast, time)
+                self.ms_cycle = (perf_counter() - _t) * 1000.0
             except Exception as err:
                 _LOGGER.error(err)
                 _LOGGER.error(traceback.format_exc())
 
             time = datetime.now()
-            self.zero_next = time + timedelta(seconds=SmartMode.TIMEZERO)
-            self.zero_fast = time + timedelta(seconds=SmartMode.TIMEFAST)
+            # Cadence RÉGLABLE en mode fondation (params exposés) au lieu des constantes amont figées.
+            if self.operation == ManagerMode.FONDATION:
+                tzero = self.fondation.timezero.asNumber / 1000.0
+                tfast = self.fondation.timefast.asNumber / 1000.0
+            else:
+                tzero, tfast = SmartMode.TIMEZERO, SmartMode.TIMEFAST
+            self.zero_next = time + timedelta(seconds=tzero)
+            self.zero_fast = time + timedelta(seconds=tfast)
 
     async def powerChanged(self, p1: int, isFast: bool, time: datetime) -> None:
         """Return the distribution setpoint."""
