@@ -178,6 +178,9 @@
       "fondation_dis_probe": {
         "name": "· Sondage décharge (3000=off)"
       },
+      "fondation_int_min": {
+        "name": "· Pas mini descente intégrale (0=proportionnel)"
+      },
       "fondation_slew": {
         "name": "· Slew-rate montée (décharge)"
       },

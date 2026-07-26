@@ -309,6 +309,27 @@ class FondationEngine:
         # plafond ne remonte qu'en observant une livraison plus haute, qu'on ne peut observer qu'en
         # demandant plus. La marge est ce qui permet de re-sonder à la hausse.
         self.dis_probe = FondationNumber(m, "fondation_dis_probe", 3000, 50, 3000, "W")
+        # PAS MINIMUM de correction à la BAISSE de l'intégrale. 0 = proportionnel pur (défaut depuis
+        # la 1.4.3.35) ; mettre 120 restaure exactement le comportement antérieur.
+        #
+        # ⚠️ CYCLE LIMITE MESURÉ LE 26/07 À 20 h. La descente s'écrivait `max(step, min(-p1, imax))` :
+        # le `max(step, …)` imposait un pas d'AU MOINS `step` (120 W) même pour un écart minuscule.
+        # Sur la fenêtre 20:00-20:23, **52 % des descentes** ont été forcées à 120 W pour un écart réel
+        # médian de **63 W** — sur-correction ×2, systématique. Comme la MONTÉE est plafonnée à `step`,
+        # l'intégrale ne pouvait pas se poser : elle battait en dents de scie ±120 W (motif
+        # −120/0/−120/0 lisible dans la trace), la consigne suivait, P1 bougeait, et on recommençait.
+        # C'est la signature d'un intégrateur à pas minimum non nul : il ne converge jamais, il oscille
+        # toujours d'au moins ±`step`. Mesuré : e-type de la consigne 334 W pour un e-type de P1 de
+        # 206 W, alors que la maison était STABLE (sèche-linge 500-530 W, sans variation).
+        #
+        # `step` cumulait deux rôles contradictoires : PLAFOND de montée et PLANCHER de descente. Le
+        # rapport montée/descente dépendait donc de sa valeur — d'où l'emballement du 26/07 matin
+        # quand il valait 30. Les deux rôles sont désormais séparés.
+        #
+        # Ce qui NE change PAS : la vertu du correctif « B » (réagir vite à un gros export) est
+        # intacte, la descente reste proportionnelle et non bridée à 2×step. Seule disparaît la
+        # sur-correction sur le bruit.
+        self.int_min = FondationNumber(m, "fondation_int_min", 0, 0, 500, "W")
         # Bouton de DÉBLOCAGE : écrit `inverseMaxPower = sf_dismax` UNE fois sur le/les SolarFlow.
         # Bouton (et non automatisme) parce que cette propriété part en FLASH : elle doit être écrite
         # rarement et volontairement. Cf. `unlock_solarflow` pour la procédure complète.
@@ -611,6 +632,8 @@ class FondationEngine:
         # VIDANGE : modérée (2×step) sur un import résiduel ; RAPIDE (proportionnelle à l'export) sur
         # un EXPORT en décharge, où réagir vite prime (cf. correctif B étendu à la décharge, plus bas).
         step = self.step.asNumber
+        # Plancher de descente, DÉCOUPLÉ de `step` (qui reste le plafond de montée). Cf. `int_min`.
+        imin = self.int_min.asNumber
         imax = sum(d.discharge_limit for d in devices)
         sat_dis = house_net >= imax - db_on                             # déchargé à fond
         sat_chg = house_net <= sum(d.charge_limit for d in devices) + db_on  # chargé à fond
@@ -668,7 +691,7 @@ class FondationEngine:
                 floor = -self.int_neg.asNumber
                 dis_base = max(0.0, t_amt)
                 if self.integral > floor:
-                    self.integral = max(floor, self.integral - max(step, min(-p1, imax)))
+                    self.integral = max(floor, self.integral - max(imin, min(-p1, imax)))
                     self.integral = max(self.integral, -dis_base)
         elif p1 < -db_off and not sat_chg:
             self.integral = min(self.integral + min(-p1, step), imax)
@@ -689,7 +712,7 @@ class FondationEngine:
             # temps fou à remonter au retour du surplus.
             floor = -self.int_neg.asNumber
             if self.integral > floor and (charge_base := max(0.0, -t_amt)) + self.integral > 0:
-                self.integral = max(floor, self.integral - max(step, min(p1, 2 * step)))
+                self.integral = max(floor, self.integral - max(imin, min(p1, 2 * step)))
                 self.integral = max(self.integral, -charge_base)
 
         # --- consignes (sur la demande CONTRÔLABLE t_amt, pas house_load) ---
@@ -1135,7 +1158,7 @@ class FondationEngine:
             f" slw{self.slew.asNumber}/{self.slew_down.asNumber} eng{self.min_engage.asNumber} ing{self.int_neg.asNumber}"
             f" cpr{self.chg_probe.asNumber} sur{self.surplus_on.asNumber}/{self.surplus_off.asNumber}"
             f" dws{self.dwell_sec.asNumber} sfd{self.sf_dismax.asNumber} idh{self.idle_hold.asNumber}"
-            f" dpr{self.dis_probe.asNumber}"
+            f" dpr{self.dis_probe.asNumber} imin{self.int_min.asNumber}"
             f" tf{self.timefast.asNumber}/{self.timezero.asNumber}"
             f" load{FondationEngine.loads}/{id(self) & 0xFFFF:04x}"
         )
@@ -1163,6 +1186,7 @@ class FondationEngine:
             ("int_neg", self.int_neg), ("chg_probe", self.chg_probe), ("sur_on", self.surplus_on),
             ("sur_off", self.surplus_off), ("dwell", self.dwell_sec),
             ("sf_dismax", self.sf_dismax), ("idle_hold", self.idle_hold), ("dis_probe", self.dis_probe),
+            ("int_min", self.int_min),
             ("timefast", self.timefast), ("timezero", self.timezero),
         ]
 
