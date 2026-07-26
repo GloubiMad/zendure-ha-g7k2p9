@@ -724,10 +724,31 @@ class FondationEngine:
             for d in devices:
                 if not self._is_producer(d, now):
                     continue
-                # En AUTORISÉ le firmware ignore la consigne : le commander ne sert à rien, et sa
-                # production est déjà comptée dans `forced`. L'inclure ici la compterait deux fois.
+                # En AUTORISÉ **ET PLEIN** le firmware ignore la consigne : le commander ne sert à
+                # rien, et sa production est déjà comptée dans `forced`. L'inclure ici la compterait
+                # deux fois.
+                #
+                # ⚠️ ANGLE MORT CORRIGÉ LE 26/07 (1.4.3.34) — la condition SOCFULL manquait ICI, et
+                # seulement ici. `forced` (l. 562) l'exige ; cette exclusion ne l'exigeait pas. Un
+                # producteur en autorisé mais NON plein tombait donc entre les deux :
+                #   - absent de `forced`  -> le moteur ne croyait pas qu'il déversait ;
+                #   - exclu de l'étape 1  -> le moteur ne lui demandait jamais rien.
+                # Ni compté, ni commandé. Son solaire partait dans SA batterie pendant qu'une autre
+                # se vidait pour la maison. Mesuré le 26/07, 16:49-18:00 : glagla 833 W de PV pour
+                # 143 W de consigne, 686 Wh encaissés en interne (SoC 43->54 %), pendant que le
+                # SolarFlow descendait 14->10 % (minSoc, 349 Wh) alors que la maison demandait
+                # 514 W sur 79 % de ces instants.
+                #
+                # La prémisse « autorisé = non pilotable » ne vaut que BATTERIE PLEINE : sans
+                # débouché interne, l'appareil déverse quoi qu'on dise (mesure du 20/07 : 719 W
+                # sortis pour une consigne de 0 — sur un appareil SOCFULL). Non plein, il obéit et
+                # met le reste dans sa batterie : mesuré le 26/07 18:05-18:51, glagla toujours en
+                # gridReverse=1, 2749 points à consigne > 200 W, **99 % de la consigne livrée**,
+                # écart médian -1 W. Les deux observations se réconcilient exactement sur SOCFULL.
+                #
+                # Aucun risque de double comptage : `forced` vaut 0 pour un appareil non plein.
                 gr = d.entities.get("gridReverse")
-                if (getattr(gr, "value", None) == 1) if gr is not None else False:
+                if d.state == DeviceState.SOCFULL and (getattr(gr, "value", None) == 1 if gr is not None else False):
                     continue
                 # Même règle qu'en contrôle direct : son solaire + au plus `me` de batterie. On
                 # PLAFONNE, on ne conditionne pas sur `drain_ema` — conditionner sur une grandeur que
