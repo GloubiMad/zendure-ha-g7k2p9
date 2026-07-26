@@ -184,6 +184,21 @@ class FondationEngine:
             return True
         return take >= (me / 2 if abs(self.cmd_applied.get(d.deviceId, 0)) > 0 else me)
 
+    def _dis_ceiling(self, d: ZendureDevice) -> float:
+        """Plafond de DÉCHARGE basé sur la livraison MESURÉE (`prod_accept`), + marge de re-sondage.
+
+        Miroir de `_chg_ceiling`. Un device peut accepter une consigne sans la livrer : le SolarFlow
+        2400 se fait brider à ~600-800 W par le cloud (`inverseMaxPower`) tout en acceptant
+        `outputLimit`, et un Hyper dérate thermiquement au-delà de 62 °C. Allouer sur la limite
+        NOMINALE lui donne alors tout le budget, le moteur croit la demande couverte, ne bascule pas
+        sur les autres batteries — et la maison importe.
+
+        `dis_probe` = 3000 (défaut) neutralise ce plafond : comportement historique inchangé.
+        """
+        if (acc := self.prod_accept.get(d.deviceId)) is None:
+            return float(d.discharge_limit)
+        return min(float(d.discharge_limit), acc + self.dis_probe.asNumber)
+
     def _chg_ceiling(self, d: ZendureDevice) -> float:
         """Plafond de charge basé sur l'ACCEPTATION MESURÉE, + une marge de ré-exploration.
 
@@ -286,6 +301,14 @@ class FondationEngine:
         # l'intégrale à 0 → la seule grandeur qui corrige les biais durables (dérating, tapering, écart
         # commande↔livraison) est effacée toutes les ~70 s et n'a jamais le temps d'agir.
         self.idle_hold = FondationNumber(m, "fondation_idle_hold", 0, 0, 120, "s")
+        # Marge de ré-exploration au-dessus de la DÉCHARGE réellement livrée (`prod_accept`), miroir
+        # exact de `chg_probe` côté charge. 3000 = plafond DÉSACTIVÉ (défaut) = comportement historique.
+        # Sert quand un device accepte une consigne mais ne la livre pas (bridage cloud du SolarFlow,
+        # dérating thermique) : sans ce plafond, le moteur croit disposer de la consigne et ne bascule
+        # pas la demande sur les autres batteries -> import. ⚠️ Trop petit, il s'auto-enferme : le
+        # plafond ne remonte qu'en observant une livraison plus haute, qu'on ne peut observer qu'en
+        # demandant plus. La marge est ce qui permet de re-sonder à la hausse.
+        self.dis_probe = FondationNumber(m, "fondation_dis_probe", 3000, 50, 3000, "W")
         # Bouton de DÉBLOCAGE : écrit `inverseMaxPower = sf_dismax` UNE fois sur le/les SolarFlow.
         # Bouton (et non automatisme) parce que cette propriété part en FLASH : elle doit être écrite
         # rarement et volontairement. Cf. `unlock_solarflow` pour la procédure complète.
@@ -711,7 +734,8 @@ class FondationEngine:
                 # la commande elle-même détermine fabrique un bang-bang (cf. 20:28 le 20/07).
                 used = fuse_p1.get(d.fuseGrp, 0.0)
                 ceiling = max(0.0, self.pv_ema[d.deviceId] - ovh) + (me if me > 0 else demand)
-                take = max(0.0, min(demand, ceiling, float(d.discharge_limit), float(d.fuseGrp.maxpower) - used))
+                # `_dis_ceiling` : plafond sur la livraison MESURÉE (cloud/dérating), cf. sa docstring.
+                take = max(0.0, min(demand, ceiling, self._dis_ceiling(d), float(d.fuseGrp.maxpower) - used))
                 cmd[d] = take
                 demand -= take
                 fuse_p1[d.fuseGrp] = used + take
@@ -821,8 +845,11 @@ class FondationEngine:
                 # BUG corrigé : `used` inclut DÉJÀ cmd[d] (le PV de l'étape 1) -> l'ancienne formule
                 # `min(limit, maxpower-used) - cmd[d]` soustrayait le PV DEUX FOIS quand le fusegroup
                 # était contraint (maxpower≈limit), bloquant la décharge batterie d'un producteur.
+                # `_dis_ceiling` au lieu de `discharge_limit` : un device bridé (cloud) ou dératé
+                # accepte la consigne sans la livrer ; sans ce plafond la demande ne déborde jamais
+                # sur les autres batteries et la maison importe.
                 used = fuse_used.get(d.fuseGrp, 0.0)
-                return max(0.0, min(d.discharge_limit - cmd[d], d.fuseGrp.maxpower - used))
+                return max(0.0, min(self._dis_ceiling(d) - cmd[d], d.fuseGrp.maxpower - used))
 
             dstrat = self.discharge_strategy.value
             if dstrat == 3:  # parallel : prorata SoC×capacité, reliquat en 2e passe
@@ -1087,6 +1114,7 @@ class FondationEngine:
             f" slw{self.slew.asNumber}/{self.slew_down.asNumber} eng{self.min_engage.asNumber} ing{self.int_neg.asNumber}"
             f" cpr{self.chg_probe.asNumber} sur{self.surplus_on.asNumber}/{self.surplus_off.asNumber}"
             f" dws{self.dwell_sec.asNumber} sfd{self.sf_dismax.asNumber} idh{self.idle_hold.asNumber}"
+            f" dpr{self.dis_probe.asNumber}"
             f" tf{self.timefast.asNumber}/{self.timezero.asNumber}"
             f" load{FondationEngine.loads}/{id(self) & 0xFFFF:04x}"
         )
@@ -1113,7 +1141,7 @@ class FondationEngine:
             ("slew", self.slew), ("slew_dn", self.slew_down), ("eng", self.min_engage),
             ("int_neg", self.int_neg), ("chg_probe", self.chg_probe), ("sur_on", self.surplus_on),
             ("sur_off", self.surplus_off), ("dwell", self.dwell_sec),
-            ("sf_dismax", self.sf_dismax), ("idle_hold", self.idle_hold),
+            ("sf_dismax", self.sf_dismax), ("idle_hold", self.idle_hold), ("dis_probe", self.dis_probe),
             ("timefast", self.timefast), ("timezero", self.timezero),
         ]
 

@@ -175,6 +175,9 @@
       "fondation_idle_hold": {
         "name": "· Gel intégrale en IDLE (s, 0=off)"
       },
+      "fondation_dis_probe": {
+        "name": "· Sondage décharge (3000=off)"
+      },
       "fondation_slew": {
         "name": "· Slew-rate montée (décharge)"
       },

@@ -170,6 +170,9 @@
       "fondation_idle_hold": {
         "name": "· Hold integral in IDLE (s, 0=off)"
       },
+      "fondation_dis_probe": {
+        "name": "· Discharge probe margin (3000=off)"
+      },
       "fondation_slew": {
         "name": "· Slew-rate up (discharge)"
       },
