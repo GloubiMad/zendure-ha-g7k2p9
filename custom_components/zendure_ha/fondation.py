@@ -141,6 +141,8 @@ class FondationEngine:
         self.clead: dict[str, bool] = {}       # hystérésis sticky par device (charge)
         self.floor: dict[str, bool] = {}       # hystérésis de plancher SoC (sticky jusqu'à minSoc+3)
         self.surplus_active = False            # hystérésis du routage de surplus solaire (anti flip-flap)
+        self.idle_since: datetime | None = None      # instant d'entrée en IDLE (gel de l'intégrale)
+        self.idle_regime: ManagerState | None = None  # régime AVANT l'entrée en IDLE (anti-contamination)
         self.dir_prev: dict[str, float] = {}   # dernière consigne appliquée (dwell d'inversion)
         self.dir_since: dict[str, datetime | None] = {}  # instant du 1er cycle d'inversion demandée (dwell en SECONDES)
         self.cmd_applied: dict[str, int] = {}  # dernière consigne RÉELLEMENT appliquée (slew-rate)
@@ -277,6 +279,13 @@ class FondationEngine:
         # 0 = OFF (défaut, aucun changement). ⚠️ On NE se fie PAS à cette valeur : le dérating THERMIQUE
         # éventuel est rattrapé par la MESURE (P1 → intégrale → bascule sur up), jamais par ce nombre.
         self.sf_dismax = FondationNumber(m, "fondation_sf_dismax", 0, 0, 3000, "W")
+        # GEL de l'intégrale sur une TRAVERSÉE courte d'IDLE (secondes). 0 = OFF = ancien comportement.
+        # Mesuré le 26/07 : 27 remises à zéro en 30 min, dont 24 sur des séjours en IDLE de MOINS DE
+        # 10 s (médiane 3 s), chacune jetant ~134 W de correction accumulée. Cause : la machine à états
+        # INTERDIT CHARGE↔DISCHARGE en direct (toute inversion transite par IDLE) et IDLE remet
+        # l'intégrale à 0 → la seule grandeur qui corrige les biais durables (dérating, tapering, écart
+        # commande↔livraison) est effacée toutes les ~70 s et n'a jamais le temps d'agir.
+        self.idle_hold = FondationNumber(m, "fondation_idle_hold", 0, 0, 120, "s")
         # Bouton de DÉBLOCAGE : écrit `inverseMaxPower = sf_dismax` UNE fois sur le/les SolarFlow.
         # Bouton (et non automatisme) parce que cette propriété part en FLASH : elle doit être écrite
         # rarement et volontairement. Cf. `unlock_solarflow` pour la procédure complète.
@@ -554,6 +563,7 @@ class FondationEngine:
         t_amt = self.amt_ema
 
         # --- machine à états avec hystérésis + fast-track (brut au-delà de ±ft => immédiat) ---
+        regime_before = self.regime  # mémorisé pour le gel d'intégrale sur traversée d'IDLE
         match self.regime:
             case ManagerState.IDLE:
                 if t_reg > db_on or t_raw > ft:
@@ -578,8 +588,36 @@ class FondationEngine:
         imax = sum(d.discharge_limit for d in devices)
         sat_dis = house_net >= imax - db_on                             # déchargé à fond
         sat_chg = house_net <= sum(d.charge_limit for d in devices) + db_on  # chargé à fond
+        # --- GEL DE L'INTÉGRALE SUR TRAVERSÉE D'IDLE (26/07) ---
+        # IDLE n'est pas un état de repos : la machine à états ci-dessus interdit CHARGE↔DISCHARGE en
+        # direct, donc TOUTE inversion y transite. Remettre l'intégrale à 0 à chaque passage effaçait
+        # la correction accumulée 27 fois par demi-heure, sur des séjours de 3 s.
+        #
+        # On ne peut PAS simplement conserver l'intégrale : son signe a un sens OPPOSÉ selon le régime
+        # (en DISCHARGE, positif = « décharge plus » ; en CHARGE, positif = « charge plus »). La RAZ
+        # existait précisément pour éviter cette contamination. On distingue donc les deux cas :
+        #   - traversée COURTE qui revient au MÊME régime  -> on GÈLE (rien n'est perdu, aucun risque) ;
+        #   - bascule vers le régime OPPOSÉ, ou séjour LONG -> on remet à 0 (comportement historique).
+        # `idle_hold` = 0 désactive tout et redonne l'ancien comportement à l'identique.
+        hold = self.idle_hold.asNumber
+        if self.regime == ManagerState.IDLE and hold > 0:
+            if regime_before != ManagerState.IDLE:
+                self.idle_since = now          # on vient d'entrer : on note l'instant et d'où on vient
+                self.idle_regime = regime_before
+            if self.idle_since is None or (now - self.idle_since).total_seconds() >= hold:
+                self.integral = 0.0            # séjour trop long : la situation a vraiment changé
+                self.idle_regime = None
+            # sinon : on ne touche PAS à l'intégrale (gel)
+        elif self.regime != ManagerState.IDLE and self.idle_regime is not None:
+            # sortie d'IDLE : on ne garde l'intégrale que si on retourne d'où l'on venait
+            if self.idle_regime != self.regime:
+                self.integral = 0.0
+            self.idle_regime = None
+            self.idle_since = None
+
         if self.regime == ManagerState.IDLE:
-            self.integral = 0.0
+            if hold <= 0:
+                self.integral = 0.0
         elif self.regime == ManagerState.DISCHARGE:
             if p1 > db_off and not sat_dis:
                 self.integral = min(self.integral + min(p1, step), imax)
@@ -1045,7 +1083,8 @@ class FondationEngine:
             f" stp{self.step.asNumber} hyd{self.hyst_device.asNumber} ovh{self.overhead.asNumber}"
             f" slw{self.slew.asNumber}/{self.slew_down.asNumber} eng{self.min_engage.asNumber} ing{self.int_neg.asNumber}"
             f" cpr{self.chg_probe.asNumber} sur{self.surplus_on.asNumber}/{self.surplus_off.asNumber}"
-            f" dws{self.dwell_sec.asNumber} sfd{self.sf_dismax.asNumber} tf{self.timefast.asNumber}/{self.timezero.asNumber}"
+            f" dws{self.dwell_sec.asNumber} sfd{self.sf_dismax.asNumber} idh{self.idle_hold.asNumber}"
+            f" tf{self.timefast.asNumber}/{self.timezero.asNumber}"
             f" load{FondationEngine.loads}/{id(self) & 0xFFFF:04x}"
         )
         split = self._split()
@@ -1071,7 +1110,8 @@ class FondationEngine:
             ("slew", self.slew), ("slew_dn", self.slew_down), ("eng", self.min_engage),
             ("int_neg", self.int_neg), ("chg_probe", self.chg_probe), ("sur_on", self.surplus_on),
             ("sur_off", self.surplus_off), ("dwell", self.dwell_sec),
-            ("sf_dismax", self.sf_dismax), ("timefast", self.timefast), ("timezero", self.timezero),
+            ("sf_dismax", self.sf_dismax), ("idle_hold", self.idle_hold),
+            ("timefast", self.timefast), ("timezero", self.timezero),
         ]
 
     def _split(self) -> str:
