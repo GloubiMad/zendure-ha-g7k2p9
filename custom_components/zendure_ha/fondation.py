@@ -396,12 +396,15 @@ class FondationEngine:
         #    fuseGrp.maxpower (le fusegroup solo plafonne à min(maxpower, discharge_limit)).
         # 2) LE DEVICE lui-même : le cloud lui re-pousse inverseMaxPower (~800 W) TOUTES LES ~6 s, vu
         #    sur le MQTT (le HEMS l'éviterait mais entrerait en conflit avec l'intégration). Débrider la
-        #    seule vue interne ne sert à rien si le device plafonne sa sortie réelle. On RÉ-ÉCRIT donc
-        #    inverseMaxPower sur le device quand il le rapporte sous la cible — throttle 5 s pour suivre
-        #    le cloud (6 s) sans spammer. Le fait que le cloud réécrive à 6 s prouve que la propriété est
-        #    VOLATILE (RAM), pas du flash : la réécrire souvent est donc sans risque d'usure.
+        #    seule vue interne ne suffit donc pas si le device plafonne sa sortie réelle — MAIS ce
+        #    déblocage-là se fait par le BOUTON (écriture unique, `unlock_solarflow`), JAMAIS ici :
+        #    `inverseMaxPower` est en FLASH. Aucune écriture périodique dans ce bloc.
         #    Le dérating THERMIQUE reste géré par la mesure : on lève la limite arbitraire du cloud, pas
         #    la protection thermique du device.
+        #
+        # ⚠️ DANGER si le device n'est PAS réellement débloqué : le moteur croirait pouvoir tirer
+        #    `sf_dis` alors que le device plafonne plus bas → il ne basculerait pas sur les autres
+        #    batteries → IMPORT. Laisser `sf_dismax` à 0 tant que le déblocage n'est pas confirmé.
         if (sf_dis := int(self.sf_dismax.asNumber)) > 0:
             for d in devices:
                 if isinstance(d, ZendureZenSdk):
