@@ -74,6 +74,9 @@
       },
       "simulation_rotate": {
         "name": "Rotation du log simulation"
+      },
+      "fondation_sf_unlock": {
+        "name": "Débrider SolarFlow (écriture unique)"
       }
     },
     "binary_sensor": {

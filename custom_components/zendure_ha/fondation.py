@@ -28,6 +28,7 @@ from time import perf_counter
 
 from homeassistant.components.number import NumberMode
 
+from .button import ZendureButton
 from .const import DeviceState, ManagerState
 from .device import ZendureDevice, ZendureZenSdk
 from .entity import EntityDevice
@@ -149,7 +150,6 @@ class FondationEngine:
         self._cmd_ent: dict[str, object] = {}
         self.debug = ""                        # queue de ligne pour simulation.csv
         self._par_prev = ""                    # dernier instantané des paramètres EFFECTIFS (cf. _params)
-        self._imp_written: dict[str, datetime] = {}  # dernier envoi inverseMaxPower par device (anti-flash)
         # Comportement producteur plein : False=STORE (stocke le surplus dans les batteries, écrête
         # le reste) ; True=BLOCK (rien ne sort, maison sur réseau). Le mapping vers un mode gridReverse
         # sera câblé plus tard (#1 = nommer les modes). Défaut STORE (le cas utile, validé).
@@ -277,6 +277,10 @@ class FondationEngine:
         # 0 = OFF (défaut, aucun changement). ⚠️ On NE se fie PAS à cette valeur : le dérating THERMIQUE
         # éventuel est rattrapé par la MESURE (P1 → intégrale → bascule sur up), jamais par ce nombre.
         self.sf_dismax = FondationNumber(m, "fondation_sf_dismax", 0, 0, 3000, "W")
+        # Bouton de DÉBLOCAGE : écrit `inverseMaxPower = sf_dismax` UNE fois sur le/les SolarFlow.
+        # Bouton (et non automatisme) parce que cette propriété part en FLASH : elle doit être écrite
+        # rarement et volontairement. Cf. `unlock_solarflow` pour la procédure complète.
+        self.sf_unlock = ZendureButton(m, "fondation_sf_unlock", self.unlock_solarflow)
         # Stratégies de répartition (n'agissent qu'en mode smart_fondation ; le « combien » reste commun).
         # Validées au banc sur 25 traces réelles : hysteresis/wide saines ; fixed_order OK avec l'hystérésis
         # de plancher ; parallel = 0 permutation mais + de grid-charge transitoire sous bruit (expérimental).
@@ -318,6 +322,39 @@ class FondationEngine:
         # En mode fondation, `manager._p1_changed` lit CES valeurs au lieu des constantes amont.
         self.timefast = FondationNumber(m, "fondation_timefast", 2200, 300, 10000, "ms")
         self.timezero = FondationNumber(m, "fondation_timezero", 4000, 300, 10000, "ms")
+
+    async def unlock_solarflow(self, _button=None) -> None:
+        """Écrit `inverseMaxPower = sf_dismax` UNE fois sur chaque SolarFlow (zenSDK local).
+
+        POURQUOI UN BOUTON, ET PAS UN AUTOMATISME. La doc officielle zenSDK classe
+        `inverseMaxPower` en écriture FLASH, « à ne pas utiliser pour du contrôle continu ». Les
+        versions 1.4.3.29/.30 le réécrivaient toutes les 5 s pour lutter contre le cloud : c'était
+        une erreur, ça use la mémoire du device. Le contrôle continu se fait par `outputLimit`
+        (ce que le moteur envoie déjà à chaque cycle) ; `inverseMaxPower` n'est que le PLAFOND,
+        à poser une fois.
+
+        PROCÉDURE (vérifiée sur la doc zenSDK + fork Gielz1986/Zendure-HA-zenSDK, 26/07) :
+          1. **HEMS désactivé dans l'app Zendure** — prérequis. Tant qu'il est actif, le cloud
+             réécrit `inverseMaxPower` (mesuré : ~800 W toutes les 6 s) et écrase tout.
+          2. Régler `fondation_sf_dismax` à la capacité réelle (2400 pour un SolarFlow 2400).
+             Ça débride la vue INTERNE du moteur (discharge_limit + fuseGrp.maxpower).
+          3. Appuyer sur ce bouton : une écriture, une seule.
+          4. Vérifier que le device rapporte bien la nouvelle valeur, et qu'elle TIENT.
+
+        ⚠️ On lève le plafond ARBITRAIRE, jamais la protection thermique : si le device dérate en
+        chauffant il livrera moins que commandé, P1 le verra et l'intégrale basculera sur `up`.
+        """
+        target = int(self.sf_dismax.asNumber)
+        if target <= 0:
+            _LOGGER.warning("SolarFlow unlock ignoré : régler d'abord « SolarFlow décharge max » (0 = off)")
+            return
+        for d in self.manager.devices:
+            if not isinstance(d, ZendureZenSdk):
+                continue
+            imp = d.entities.get("inverseMaxPower")
+            current = getattr(imp, "asInt", None) if imp is not None else None
+            _LOGGER.warning("SolarFlow unlock %s : inverseMaxPower %s -> %s (écriture FLASH unique)", d.name, current, target)
+            await d.doCommand({"properties": {"inverseMaxPower": target}})
 
     def createDeviceEntities(self) -> None:
         """Capteur de consigne par onduleur. À appeler APRÈS le chargement des devices.
@@ -361,12 +398,10 @@ class FondationEngine:
                 if isinstance(d, ZendureZenSdk):
                     d.discharge_limit = sf_dis
                     d.fuseGrp.maxpower = max(d.fuseGrp.maxpower, sf_dis)
-                    imp = d.entities.get("inverseMaxPower")
-                    if imp is not None and getattr(imp, "asInt", sf_dis) < sf_dis:
-                        last = self._imp_written.get(d.deviceId)
-                        if last is None or (now - last).total_seconds() > 5:
-                            self._imp_written[d.deviceId] = now
-                            await d.doCommand({"properties": {"inverseMaxPower": sf_dis}})
+                    # ⚠️ AUCUNE écriture de `inverseMaxPower` ici : la doc zenSDK officielle le dit
+                    # écrit en FLASH et « à ne pas utiliser pour du contrôle continu ». L'écrire à
+                    # chaque cycle (versions .29/.30) userait la mémoire. Le déblocage se fait par le
+                    # bouton `fondation_sf_unlock`, UNE seule écriture, cf. `unlock_solarflow`.
 
         # --- diagnostic : AVANT de recalculer, on confronte la mesure courante à la consigne
         # encore en vigueur. Ne corrige rien, se contente de nommer un device qui n'obéit pas.
