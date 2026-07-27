@@ -372,6 +372,33 @@ class FondationEngine:
         # pas le comparer sur une trace réelle. Le remettre à 1 permettra de trancher le jour où le
         # cas se présentera vraiment.
         self.direct = FondationNumber(m, "fondation_direct", 0, 0, 1)
+        # SEUIL D'ENGAGEMENT DES PUITS DE CHARGE (W). 0 = OFF = comportement antérieur.
+        #
+        # `_engage_ok` existait mais n'était appliqué QU'EN DÉCHARGE, étape 2 (constat n°5 de l'audit
+        # du 27/07). Côté charge, aucun seuil : `up` était réveillé pour 37 W — un onduleur en
+        # consomme ~50 rien que pour fonctionner. Mesuré le 27/07 : **66 allumages en 13 h 47**, un
+        # toutes les 12 min, durée médiane 2 s, et 27 % seulement de la consigne réellement absorbée.
+        #
+        # VALEUR CHOISIE PAR LA MESURE, en rejouant la trace pour chaque seuil candidat :
+        #     seuil    allumages   Wh perdus   Wh captés
+        #        0        66          0,0        25,9
+        #      250        18          2,9        17,4
+        #      350        13          3,9        11,8
+        #      400         7          5,0         8,4
+        #      500         3          5,0         5,5      <- la courbe s'aplatit ici
+        #      700         3          5,0         5,5
+        # Le palier 400 -> 500 est GRATUIT (4 allumages de moins, 0 Wh de plus) et au-delà rien ne
+        # bouge. L'enjeu énergétique total est dérisoire — 26 Wh sur 14 h, quand glagla produit
+        # 2774 Wh dans la seule matinée — alors que le cyclage, lui, est massif. L'utilisateur a
+        # tranché : préserver l'onduleur prime sur quelques watts.
+        #
+        # Le seuil ne mord QUE sur les petites parts. Quand le SolarFlow tapère (>95 % de SoC) il
+        # n'absorbe plus rien et TOUT le surplus revient à `up` : sa part passe très au-dessus de
+        # 500 W et le seuil s'efface — exactement quand `up` devient utile. L'hystérésis de
+        # `_engage_ok` fait le reste : une fois démarré, il continue jusqu'à 250 W.
+        # Les PRODUCTEURS en sont exemptés (`_engage_ok`) : déjà allumés, les engager ne coûte
+        # aucun cycle supplémentaire.
+        self.min_engage_chg = FondationNumber(m, "fondation_min_engage_chg", 500, 0, 1000, "W")
         # Bouton de DÉBLOCAGE : écrit `inverseMaxPower = sf_dismax` UNE fois sur le/les SolarFlow.
         # Bouton (et non automatisme) parce que cette propriété part en FLASH : elle doit être écrite
         # rarement et volontairement. Cf. `unlock_solarflow` pour la procédure complète.
@@ -803,6 +830,9 @@ class FondationEngine:
 
         # --- consignes (sur la demande CONTRÔLABLE t_amt, pas house_load) ---
         cmd: dict[ZendureDevice, float] = dict.fromkeys(devices, 0.0)
+        # Seuil d'engagement des PUITS, distinct de celui de la décharge (`min_engage`). Il sert dans
+        # les deux régimes : le routage de surplus vit en DISCHARGE/IDLE, la charge du bus en CHARGE.
+        me_chg = self.min_engage_chg.asNumber
         # IDLE passe aussi par ici : house_load ≈ 0 ne signifie PAS « pas de surplus solaire », mais
         # « bus équilibré » — typiquement parce que les APsystems couvrent la maison ET que le producteur
         # encaisse tout son solaire en interne. Sans ça, en IDLE on commandait 0 -> glagla encaissait
@@ -937,12 +967,20 @@ class FondationEngine:
                     total_charge = routable if self.surplus_active else 0.0
                     if total_charge > 0:
                         rem = total_charge
+                        alloue = 0.0  # ⚠️ ce qui est RÉELLEMENT parti dans un puits (cf. plus bas)
                         for d in sinks:  # les batteries sans PV absorbent
                             take = min(rem, chg_room(d))
+                            if not self._engage_ok(d, take, me_chg, now):
+                                continue
                             cmd[d] -= take
                             rem -= take
+                            alloue += take
                             fuse_chg[d.fuseGrp] = fuse_chg.get(d.fuseGrp, 0.0) + take
-                        rem = total_charge
+                        # ⚠️ Les producteurs ne sortent QUE ce qui a trouvé preneur. Avec
+                        # `total_charge` ici, un puits écarté par le seuil d'engagement laissait le
+                        # producteur sortir la part quand même : elle ne pouvait aller nulle part et
+                        # partait AU RÉSEAU. Le seuil aurait fabriqué l'export qu'il doit éviter.
+                        rem = alloue
                         for d, extra_cap in prod_extra.items():  # les producteurs sortent ce surplus en plus
                             extra = min(rem, extra_cap)
                             cmd[d] += extra
@@ -1050,11 +1088,15 @@ class FondationEngine:
                 share = rem
                 for d in cand:
                     take = min(share * weights[d] / total_w if total_w > 0 else 0.0, chg_cap(d))
+                    if not self._engage_ok(d, take, me_chg, now):
+                        continue
                     cmd[d] -= take
                     rem -= take
                     fuse_used[d.fuseGrp] = fuse_used.get(d.fuseGrp, 0.0) + take
                 for d in cand:
                     take = min(rem, chg_cap(d))
+                    if not self._engage_ok(d, take, me_chg, now):
+                        continue
                     cmd[d] -= take
                     rem -= take
                     fuse_used[d.fuseGrp] = fuse_used.get(d.fuseGrp, 0.0) + take
@@ -1066,6 +1108,8 @@ class FondationEngine:
                     cand.sort(key=lambda d: (self.pv_ema.get(d.deviceId, 0.0) > 25.0, d.electricLevel.asInt - (hyst if self.clead.get(d.deviceId) else 0)))
                 for d in cand:
                     take = min(rem, chg_cap(d))
+                    if not self._engage_ok(d, take, me_chg, now):
+                        continue
                     cmd[d] -= take
                     rem -= take
                     fuse_used[d.fuseGrp] = fuse_used.get(d.fuseGrp, 0.0) + take
@@ -1105,12 +1149,16 @@ class FondationEngine:
                 self.surplus_active = routable >= seuil
                 if self.surplus_active and routable > 0:
                     r = routable
+                    alloue = 0.0  # JUMEAU de l'étape 1bis en DISCHARGE : ne faire sortir que le placé
                     for d in sinks:  # les batteries sans PV absorbent en plus
                         take = min(r, chg_cap(d))
+                        if not self._engage_ok(d, take, me_chg, now):
+                            continue
                         cmd[d] -= take
                         r -= take
+                        alloue += take
                         fuse_used[d.fuseGrp] = fuse_used.get(d.fuseGrp, 0.0) + take
-                    r = routable
+                    r = alloue
                     for d, cap in prod_extra.items():  # les producteurs sortent leur solaire
                         extra = min(r, cap)
                         cmd[d] += extra
@@ -1245,7 +1293,7 @@ class FondationEngine:
             f" cpr{self.chg_probe.asNumber} sur{self.surplus_on.asNumber}/{self.surplus_off.asNumber}"
             f" dws{self.dwell_sec.asNumber} sfd{self.sf_dismax.asNumber} idh{self.idle_hold.asNumber}"
             f" dpr{self.dis_probe.asNumber} imin{self.int_min.asNumber} wkg{self.wake_grace.asNumber}"
-            f" dir{self.direct.asNumber}"
+            f" dir{self.direct.asNumber} engc{self.min_engage_chg.asNumber}"
             f" tf{self.timefast.asNumber}/{self.timezero.asNumber}"
             f" load{FondationEngine.loads}/{id(self) & 0xFFFF:04x}"
         )
@@ -1274,6 +1322,7 @@ class FondationEngine:
             ("sur_off", self.surplus_off), ("dwell", self.dwell_sec),
             ("sf_dismax", self.sf_dismax), ("idle_hold", self.idle_hold), ("dis_probe", self.dis_probe),
             ("int_min", self.int_min), ("wake_grace", self.wake_grace), ("direct", self.direct),
+            ("eng_chg", self.min_engage_chg),
             ("timefast", self.timefast), ("timezero", self.timezero),
         ]
 

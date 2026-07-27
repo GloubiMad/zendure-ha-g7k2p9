@@ -187,6 +187,9 @@
       "fondation_direct": {
         "name": "· Contrôle direct SOCFULL (0=off, obsolète)"
       },
+      "fondation_min_engage_chg": {
+        "name": "· Seuil d'engagement en charge (0=off)"
+      },
       "fondation_slew": {
         "name": "· Slew-rate montée (décharge)"
       },

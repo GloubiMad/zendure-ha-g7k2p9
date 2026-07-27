@@ -182,6 +182,9 @@
       "fondation_direct": {
         "name": "· SOCFULL direct control (0=off, legacy)"
       },
+      "fondation_min_engage_chg": {
+        "name": "· Charge engage threshold (0=off)"
+      },
       "fondation_slew": {
         "name": "· Slew-rate up (discharge)"
       },
