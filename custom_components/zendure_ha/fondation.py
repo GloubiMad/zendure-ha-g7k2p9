@@ -211,7 +211,7 @@ class FondationEngine:
         """
         return (now - self.pv_seen.get(d.deviceId, datetime.min)).total_seconds() < PV_MEMORY
 
-    def _engage_ok(self, d: ZendureDevice, take: float, me: float, now: datetime) -> bool:
+    def _engage_ok(self, d: ZendureDevice, take: float, me: float, now: datetime, charge: bool = False) -> bool:
         """Faut-il vraiment réveiller CE device pour CETTE part ?
 
         Le seuil porte sur la part REÇUE PAR L'APPAREIL, pas sur le besoin total : mesuré le 20/07,
@@ -222,8 +222,31 @@ class FondationEngine:
         Un PRODUCTEUR n'est jamais soumis au seuil : son solaire est gratuit, quelle que soit la part.
         Hystérésis : un appareil déjà démarré continue jusqu'à la moitié du seuil, pour ne pas
         s'allumer et s'éteindre en boucle autour de la valeur.
+
+        ⚠️ ANTI-VERROU MUTUEL (27/07/2026) — deux garde-fous se bloquaient l'un l'autre.
+        `_chg_ceiling` plafonne sur l'acceptation MESURÉE plus une marge de re-sondage ; ce seuil-ci
+        refuse les petites parts. Quand la mesure tombe à zéro, le plafond descend à la seule marge
+        (`chg_probe`, 150 W) — donc SOUS le seuil d'engagement. L'appareil ne peut plus être engagé,
+        donc plus rien absorber, donc sa mesure ne remonte jamais. Fermé à double tour.
+
+        Constaté sur `up` : `chg_accept` = 0 -> plafond 150 W -> refusé par un seuil de 500 W ->
+        3,84 kWh de place inutilisables, pendant que le SolarFlow tapérait à 94 % de SoC et que
+        glagla encaissait tout son solaire dans SA batterie (84 % de SoC), à l'inverse de la
+        stratégie voulue.
+
+        La marge de re-sondage n'a de sens que si elle reste ATTEIGNABLE : un appareil dont
+        l'acceptation mesurée est nulle est donc exempté du seuil, à condition que la part proposée
+        atteigne au moins cette marge (on ne réveille pas pour 20 W, on sonde pour de bon).
+        Dès qu'il absorbe, la mesure repasse au-dessus de zéro et le seuil s'applique de nouveau.
+
+        Le test est écrit une seule fois pour les DEUX sens : `dis_probe` = 3000 (neutre) rend
+        l'exemption inopérante en décharge, ce qui est exactement correct — sans plafond, pas de
+        verrou possible.
         """
         if me <= 0 or take <= 0 or self._is_producer(d, now):
+            return True
+        acc = self.chg_accept.get(d.deviceId) if charge else self.prod_accept.get(d.deviceId)
+        if not acc and take >= (self.chg_probe.asNumber if charge else self.dis_probe.asNumber):
             return True
         return take >= (me / 2 if abs(self.cmd_applied.get(d.deviceId, 0)) > 0 else me)
 
@@ -1044,7 +1067,7 @@ class FondationEngine:
                         alloue = 0.0  # ⚠️ ce qui est RÉELLEMENT parti dans un puits (cf. plus bas)
                         for d in sinks:  # les batteries sans PV absorbent
                             take = min(rem, chg_room(d))
-                            if not self._engage_ok(d, take, me_chg, now):
+                            if not self._engage_ok(d, take, me_chg, now, charge=True):
                                 continue
                             cmd[d] -= take
                             rem -= take
@@ -1162,14 +1185,14 @@ class FondationEngine:
                 share = rem
                 for d in cand:
                     take = min(share * weights[d] / total_w if total_w > 0 else 0.0, chg_cap(d))
-                    if not self._engage_ok(d, take, me_chg, now):
+                    if not self._engage_ok(d, take, me_chg, now, charge=True):
                         continue
                     cmd[d] -= take
                     rem -= take
                     fuse_used[d.fuseGrp] = fuse_used.get(d.fuseGrp, 0.0) + take
                 for d in cand:
                     take = min(rem, chg_cap(d))
-                    if not self._engage_ok(d, take, me_chg, now):
+                    if not self._engage_ok(d, take, me_chg, now, charge=True):
                         continue
                     cmd[d] -= take
                     rem -= take
@@ -1182,7 +1205,7 @@ class FondationEngine:
                     cand.sort(key=lambda d: (self._has_pv(d), d.electricLevel.asInt - (hyst if self.clead.get(d.deviceId) else 0)))
                 for d in cand:
                     take = min(rem, chg_cap(d))
-                    if not self._engage_ok(d, take, me_chg, now):
+                    if not self._engage_ok(d, take, me_chg, now, charge=True):
                         continue
                     cmd[d] -= take
                     rem -= take
@@ -1226,7 +1249,7 @@ class FondationEngine:
                     alloue = 0.0  # JUMEAU de l'étape 1bis en DISCHARGE : ne faire sortir que le placé
                     for d in sinks:  # les batteries sans PV absorbent en plus
                         take = min(r, chg_cap(d))
-                        if not self._engage_ok(d, take, me_chg, now):
+                        if not self._engage_ok(d, take, me_chg, now, charge=True):
                             continue
                         cmd[d] -= take
                         r -= take
