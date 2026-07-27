@@ -27,6 +27,7 @@ from datetime import datetime
 from time import perf_counter
 
 from homeassistant.components.number import NumberMode
+from homeassistant.helpers.restore_state import RestoreEntity
 
 from .button import ZendureButton
 from .const import DeviceState, ManagerState
@@ -35,6 +36,7 @@ from .entity import EntityDevice
 from .number import ZendureRestoreNumber
 from .select import ZendureRestoreSelect
 from .sensor import ZendureSensor
+from .switch import ZendureSwitch
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -119,6 +121,44 @@ class FondationNumber(ZendureRestoreNumber):
             FondationNumber.trace.append(f"{name} restaure={restored} defaut={self._default} lu={seen} retenu={self._attr_native_value}")
 
 
+class FondationSwitch(ZendureSwitch, RestoreEntity):
+    """Interrupteur de CONFIGURATION, restaurable. `ZendureSwitch` ne restaure rien : son état est
+    perdu à chaque redémarrage de Home Assistant (c'est ce qui remettait le switch de simulation à
+    zéro). Inacceptable pour une propriété matérielle, dont la perte serait silencieuse.
+
+    Même correctif de course que `FondationNumber` : `ZendureSwitch.__init__` se termine par
+    `self.add([self])`, qui exécute `async_added_to_hass` AVANT que ce constructeur ait fini.
+    On rétablit donc ici ce que la restauration a obtenu. Correct dans les deux sens si la course
+    s'inversait un jour.
+    """
+
+    def __init__(self, device: EntityDevice, uniqueid: str, default: bool = False) -> None:
+        self._default = default
+        self._restored: bool | None = None  # doit exister AVANT super() (cf. course ci-dessus)
+        super().__init__(device, uniqueid, self._write, None, None, default)
+        self._attr_is_on = self._restored if self._restored is not None else default
+
+    def _write(self, _entity: object, value: object) -> None:
+        """Bascule depuis l'interface. `ZendureSwitch` délègue tout à `onwrite` : sans ça, cocher
+        la case n'aurait aucun effet sur l'état interne."""
+        self._attr_is_on = bool(value)
+        if self.hass and self.hass.loop.is_running():
+            self.schedule_update_ha_state()
+
+    def learn(self) -> None:
+        """COCHAGE automatique — jamais de décochage (cf. `FondationEngine._has_pv`)."""
+        if not self._attr_is_on:
+            _LOGGER.warning("Panneaux détectés sur %s : la case « PV raccordés » est cochée", self.device.name)
+            self._write(self, True)
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        state = await self.async_get_last_state()
+        self._attr_is_on = state.state == "on" if state is not None and state.state in ("on", "off") else self._default
+        self._restored = self._attr_is_on
+        FondationNumber.trace.append(f"{self.device.name}/PV restaure={self._attr_is_on} lu={'None' if state is None else state.state}")
+
+
 class FondationEngine:
     """Moteur fondation. Instancié par le Manager, activé par le mode d'opération « smart_fondation »."""
 
@@ -152,6 +192,7 @@ class FondationEngine:
         # le watchdog (choix d'une commande de réveil DIFFÉRENTE). Vit ici : c'est le moteur qui commande.
         self.cmd_target: dict[str, int] = {}
         self._cmd_ent: dict[str, object] = {}
+        self._pv_ent: dict[str, FondationSwitch] = {}  # case « panneaux raccordés », par onduleur
         self.debug = ""                        # queue de ligne pour simulation.csv
         self._par_prev = ""                    # dernier instantané des paramètres EFFECTIFS (cf. _params)
         # Comportement producteur plein : False=STORE (stocke le surplus dans les batteries, écrête
@@ -479,11 +520,40 @@ class FondationEngine:
             await d.doCommand({"properties": {"inverseMaxPower": target}})
 
     def createDeviceEntities(self) -> None:
-        """Capteur de consigne par onduleur. À appeler APRÈS le chargement des devices.
-        C'est LE graphe de diagnostic : commande vs réalisé (outputHomePower)."""
+        """Capteur de consigne + case « panneaux raccordés », par onduleur. À appeler APRÈS le
+        chargement des devices. `cmdTarget` est LE graphe de diagnostic : commande vs réalisé."""
         for d in self.manager.devices:
             if d.deviceId not in self._cmd_ent:
                 self._cmd_ent[d.deviceId] = ZendureSensor(d, "cmdTarget", None, "W", "power", "measurement", state=0)
+            if d.deviceId not in self._pv_ent:
+                self._pv_ent[d.deviceId] = FondationSwitch(d, "hasSolar", False)
+
+    def _has_pv(self, d: ZendureDevice) -> bool:
+        """CET ONDULEUR A-T-IL DES PANNEAUX ? Propriété du matériel, DÉCLARÉE, pas devinée.
+
+        ⚠️ Remplace trois définitions divergentes (audit du 27/07) : `pv_ema > 25` dans les tris de
+        charge, `pv_ema - overhead <= 0` dans les filtres de puits, et la mémoire de 30 min de
+        `_is_producer`. Trois écritures d'une même notion — la forme exacte de tous les bugs graves
+        de juillet.
+
+        Pourquoi une déclaration et non une mesure : un appareil sans débouché ÉCRÊTE SES PROPRES
+        PANNEAUX (mesuré le 20/07 : 773 W en autorisé, 152 W en interdit, même soleil). Sa mesure de
+        PV s'effondre donc À CAUSE DE NOTRE PROPRE COMMANDE, et il se faisait reclasser « sans PV »
+        exactement au mauvais moment — la nuit, à l'aube, sous les nuages. Or c'est là que la
+        stratégie de l'utilisateur compte le plus : un producteur doit être chargé EN DERNIER, car
+        sa batterie est le SEUL débouché de son solaire au-delà de sa limite AC. Mesuré : glagla
+        produit jusqu'à 1727 W pour 1200 W de sortie maximale, soit 216-236 Wh par jour qui ne
+        peuvent physiquement passer que par sa batterie. S'il est plein au pic, c'est perdu.
+
+        La case s'apprend seule (cf. `learn`) et ne se décoche jamais toute seule : si la
+        restauration échouait, la première production de la journée la recoche. Panne bénigne.
+
+        ⚠️ NE PAS confondre avec `_is_producer`, qui répond à « produit-il MAINTENANT ? » — question
+        différente, légitime, utilisée pour la décharge et laissée intacte.
+        """
+        if (ent := self._pv_ent.get(d.deviceId)) is None:
+            return self.pv_ema.get(d.deviceId, 0.0) > PV_SEEN_MIN  # avant création des entités
+        return bool(ent.is_on)
 
     def cmd_of(self, d) -> int:
         """Dernière consigne envoyée à ce device (0 si le moteur ne l'a pas encore piloté)."""
@@ -555,6 +625,10 @@ class FondationEngine:
             # car l'absence de production ne prouve rien (elle peut venir de notre propre consigne).
             if solar > PV_SEEN_MIN:
                 self.pv_seen[d.deviceId] = now
+                # APPRENTISSAGE de la case « panneaux raccordés » : produire prouve qu'il en a.
+                # Cochage seulement — jamais l'inverse, sinon la nuit effacerait la déclaration.
+                if (pvent := self._pv_ent.get(d.deviceId)) is not None:
+                    pvent.learn()
             # Soutirage batterie (+ = se vide). Seule mesure NON suppressible par la consigne, donc
             # le seul critère fiable pour savoir si un producteur donne du gratuit ou puise sa réserve.
             drain = float(d.batteryOutput.asInt - d.batteryInput.asInt)
@@ -928,7 +1002,7 @@ class FondationEngine:
                     sinks = [
                         d
                         for d in devices
-                        if (self.pv_ema[d.deviceId] - ovh) <= 0 and d.state != DeviceState.SOCFULL and not self._bypass_blocks(d) and d.electricLevel.asInt < 100
+                        if not self._has_pv(d) and d.state != DeviceState.SOCFULL and not self._bypass_blocks(d) and d.electricLevel.asInt < 100
                     ]
                     if self.charge_strategy.value == 2:  # fixed_order : le plus gros d'abord
                         sinks.sort(key=lambda d: -d.kWh)
@@ -1102,10 +1176,10 @@ class FondationEngine:
                     fuse_used[d.fuseGrp] = fuse_used.get(d.fuseGrp, 0.0) + take
             else:
                 if cstrat == 2:  # fixed_order : sans-PV d'abord, puis le plus gros (garde la marge PV)
-                    cand.sort(key=lambda d: (self.pv_ema.get(d.deviceId, 0.0) > 25.0, -d.kWh))
+                    cand.sort(key=lambda d: (self._has_pv(d), -d.kWh))
                 else:            # hysteresis / hysteresis_wide : sans-PV d'abord, puis plus-vide + sticky
                     hyst = 15 if cstrat == 1 else self.hyst_device.asNumber
-                    cand.sort(key=lambda d: (self.pv_ema.get(d.deviceId, 0.0) > 25.0, d.electricLevel.asInt - (hyst if self.clead.get(d.deviceId) else 0)))
+                    cand.sort(key=lambda d: (self._has_pv(d), d.electricLevel.asInt - (hyst if self.clead.get(d.deviceId) else 0)))
                 for d in cand:
                     take = min(rem, chg_cap(d))
                     if not self._engage_ok(d, take, me_chg, now):
@@ -1118,7 +1192,7 @@ class FondationEngine:
             # S'il RESTE de la place dans les batteries sans PV, y router aussi le solaire des producteurs
             # au lieu de les laisser l'encaisser (même seuil/hystérésis qu'en décharge). Si le bus a déjà
             # saturé les batteries (rem > 0), il ne reste pas de place -> pas de routage, repli naturel.
-            sinks = [d for d in cand if (self.pv_ema[d.deviceId] - ovh) <= 0 and d.electricLevel.asInt < 100]
+            sinks = [d for d in cand if not self._has_pv(d) and d.electricLevel.asInt < 100]
             room_left = sum(chg_cap(d) for d in sinks)
             if room_left <= 0:
                 self.surplus_active = False
@@ -1410,9 +1484,9 @@ class FondationEngine:
             self.regime = ManagerState.CHARGE
             sinks = [d for d in devices if d.state != DeviceState.SOCFULL and not self._bypass_blocks(d) and d.electricLevel.asInt < 100]
             if self.charge_strategy.value == 2:  # fixed_order : sans-PV d'abord, puis le plus gros
-                sinks.sort(key=lambda d: (self.pv_ema.get(d.deviceId, 0.0) > 25.0, -d.kWh))
+                sinks.sort(key=lambda d: (self._has_pv(d), -d.kWh))
             else:                                 # sans-PV d'abord, puis plus-vide
-                sinks.sort(key=lambda d: (self.pv_ema.get(d.deviceId, 0.0) > 25.0, d.electricLevel.asInt))
+                sinks.sort(key=lambda d: (self._has_pv(d), d.electricLevel.asInt))
             fuse_used: dict[object, float] = {}
 
             def chg_cap(d: ZendureDevice) -> float:

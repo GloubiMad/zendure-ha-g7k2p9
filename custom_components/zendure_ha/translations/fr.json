@@ -606,6 +606,9 @@
       }
     },
     "switch": {
+      "has_solar": {
+        "name": "Panneaux solaires raccordés"
+      },
       "lamp_switch": {
         "name": "LED"
       },

@@ -626,6 +626,9 @@
       }
     },
     "switch": {
+      "has_solar": {
+        "name": "Solar panels connected"
+      },
       "lamp_switch": {
         "name": "LED"
       },
