@@ -136,6 +136,8 @@ class FondationEngine:
         self.prod_refuse: dict[str, int] = {}    # cycles consécutifs de sous-livraison
         self.chg_prev: dict[str, float] = {}     # absorption du cycle précédent (détection de rampe)
         self.prod_prev: dict[str, float] = {}    # livraison du cycle précédent (détection de rampe)
+        self.chg_wake: dict[str, datetime] = {}  # début de la LATENCE DE DÉMARRAGE en charge
+        self.prod_wake: dict[str, datetime] = {} # idem côté production
         self.pv_ema: dict[str, float] = {}     # EMA du PV par device (distribution)
         self.lead: dict[str, bool] = {}        # hystérésis sticky par device (décharge batterie)
         self.clead: dict[str, bool] = {}       # hystérésis sticky par device (charge)
@@ -330,6 +332,28 @@ class FondationEngine:
         # intacte, la descente reste proportionnelle et non bridée à 2×step. Seule disparaît la
         # sur-correction sur le bruit.
         self.int_min = FondationNumber(m, "fondation_int_min", 0, 0, 500, "W")
+        # DÉLAI DE GRÂCE AU DÉMARRAGE (s). 0 = OFF = comportement antérieur.
+        #
+        # ⚠️ Mesuré le 27/07 à 11:06 : un onduleur met ~10-13 s à monter en charge. Pendant ce temps
+        # il absorbe/livre ZÉRO alors que la consigne est déjà là. Le détecteur de refus concluait
+        # donc au refus et écrasait le plafond mesuré :
+        #   11:06:24  SolarFlow consigne -381  absorbe 0   acc=1714
+        #   11:06:30  SolarFlow consigne -507  absorbe 0   acc=   0   <- effondrement
+        #   11:06:53  SolarFlow                  -2226     acc=2226   <- il pouvait tout prendre
+        # Conséquence en cascade : `chg_room` du SolarFlow tombe à `chg_probe` (150 W) -> le moteur
+        # croit à un besoin de puits supplémentaire -> il réveille `up` -> `up` met LUI AUSSI 13 s à
+        # démarrer -> pendant ce temps le SolarFlow a fini sa rampe et, la stratégie de charge étant
+        # « le plus gros d'abord », il reprend tout le budget -> `up` est coupé au moment précis où
+        # il commençait à absorber. 26 épisodes ce matin-là, durée MÉDIANE 6 s, 69 % sous 10 s, et
+        # `up` n'absorbe rien sur 75 % des cycles qu'on lui commande.
+        #
+        # Le garde-fou existant (`rising` + `CHG_REFUSE_N`) ne protège QUE la rampe déjà commencée.
+        # Il est aveugle au cas « encore à zéro », qui est justement celui du démarrage. On chronomètre
+        # donc le temps passé à ne rien prendre AVEC une consigne active : tant qu'il est sous
+        # `wake_grace`, on ne conclut pas. Le chrono repart de zéro dès que l'appareil bouge ou que la
+        # consigne retombe — il ne dépend PAS de la valeur de la consigne, donc le slew qui la fait
+        # varier à chaque cycle ne le réarme pas indéfiniment.
+        self.wake_grace = FondationNumber(m, "fondation_wake_grace", 15, 0, 60, "s")
         # Bouton de DÉBLOCAGE : écrit `inverseMaxPower = sf_dismax` UNE fois sur le/les SolarFlow.
         # Bouton (et non automatisme) parce que cette propriété part en FLASH : elle doit être écrite
         # rarement et volontairement. Cf. `unlock_solarflow` pour la procédure complète.
@@ -472,7 +496,9 @@ class FondationEngine:
         db_off = self.db_off.asNumber
         ft = self.fast_track.asNumber
         step = self.step.asNumber
-        imax = sum(d.discharge_limit for d in devices)
+        # Capacité mobilisable — calculée UNE fois ici, car elle part aussi dans `_direct_control`.
+        # Cf. le commentaire détaillé plus bas (bug de l'anti-windup, nuit du 27/07).
+        imax = sum(d.discharge_limit for d in devices if d.state != DeviceState.SOCEMPTY)
 
         # --- pv-EMA par device (lisse le PV utilisé partout, sans lisser le total) ---
         palpha = max(0.05, min(1.0, self.pv_alpha.asNumber / 100.0))
@@ -507,7 +533,16 @@ class FondationEngine:
             # Même discriminant rampe/refus que côté charge (cf. commentaire ci-dessous).
             up = out_real > self.prod_prev.get(d.deviceId, 0.0) + RAMP_RISE
             self.prod_prev[d.deviceId] = out_real
-            if out_asked >= CHG_REFUSE_MIN and not up and out_real < min(out_asked - 100, out_asked * 0.75):
+            # LATENCE DE DÉMARRAGE (cf. `wake_grace`) : miroir exact de la branche charge. Ne pas
+            # patcher les deux côtés est ce qui a produit les bugs jumeaux `chg_room`/`chg_cap`
+            # (23/07) et `forced`/étape 1 (26/07).
+            if out_asked < CHG_REFUSE_MIN or out_real > RAMP_RISE:
+                self.prod_wake.pop(d.deviceId, None)
+            else:
+                self.prod_wake.setdefault(d.deviceId, now)
+            grace = self.wake_grace.asNumber
+            out_waking = grace > 0 and d.deviceId in self.prod_wake and (now - self.prod_wake[d.deviceId]).total_seconds() < grace
+            if not out_waking and out_asked >= CHG_REFUSE_MIN and not up and out_real < min(out_asked - 100, out_asked * 0.75):
                 n = self.prod_refuse.get(d.deviceId, 0) + 1
                 self.prod_refuse[d.deviceId] = n
                 if n >= CHG_REFUSE_N:
@@ -531,7 +566,16 @@ class FondationEngine:
             # On exige donc trois conditions pour conclure au refus : une consigne assez GRANDE pour
             # que la mesure ait un sens, un manque à la fois absolu ET relatif, et surtout une
             # absorption qui NE MONTE PLUS.
-            if asked >= CHG_REFUSE_MIN and not rising and absorbed < min(asked - 100, asked * 0.75):
+            # LATENCE DE DÉMARRAGE — le chrono ne court que si on DEMANDE et qu'il ne prend RIEN.
+            # Il se réarme dès que l'appareil bouge (`absorbed > RAMP_RISE`) ou que la consigne
+            # retombe : un appareil réellement incapable dépasse `wake_grace` et retombe dans la
+            # détection de refus normale, sans changement.
+            if asked < CHG_REFUSE_MIN or absorbed > RAMP_RISE:
+                self.chg_wake.pop(d.deviceId, None)
+            else:
+                self.chg_wake.setdefault(d.deviceId, now)
+            waking = grace > 0 and d.deviceId in self.chg_wake and (now - self.chg_wake[d.deviceId]).total_seconds() < grace
+            if not waking and asked >= CHG_REFUSE_MIN and not rising and absorbed < min(asked - 100, asked * 0.75):
                 n = self.chg_refuse.get(d.deviceId, 0) + 1
                 self.chg_refuse[d.deviceId] = n
                 if n >= CHG_REFUSE_N:
@@ -634,9 +678,26 @@ class FondationEngine:
         step = self.step.asNumber
         # Plancher de descente, DÉCOUPLÉ de `step` (qui reste le plafond de montée). Cf. `int_min`.
         imin = self.int_min.asNumber
-        imax = sum(d.discharge_limit for d in devices)
+        # ⚠️ CAPACITÉ RÉELLEMENT MOBILISABLE, pas la somme des PLAQUES SIGNALÉTIQUES (27/07).
+        # `imax` sommait les limites des TROIS appareils, y compris ceux à leur plancher de SoC qui
+        # ne peuvent rien donner. Nuit du 27/07 : les trois batteries SOCEMPTY (SolarFlow 10 %,
+        # glagla 15 %, up 9 %), capacité réelle **0 W**, `imax` = 4800 -> l'anti-windup
+        # `house_net >= imax - db_on` n'a JAMAIS pu être vrai et **l'intégrale est restée collée à
+        # 4800 de 00 h à 08 h**, huit heures. L'import de 492 W était structurel (parc vide, rien à
+        # corriger) — mais l'intégrale n'avait aucune raison d'empiler une correction qu'aucun
+        # appareil ne pouvait appliquer.
+        #
+        # ⚠️ `imax` a TROIS rôles : anti-windup, plafond de l'intégrale, et plafond de la descente.
+        # Les trois deviennent justes ensemble — l'intégrale ne doit jamais dépasser ce qu'on peut
+        # réellement commander. C'est le même piège que `step`, qui cumulait plafond de montée et
+        # plancher de descente (cf. `int_min`) : un symbole, plusieurs rôles, et une correction sur
+        # l'un cassait l'autre. Quand tout est vide, `imax` = 0 : l'intégrale est écrêtée à 0, ce qui
+        # est exactement le comportement voulu.
+        # (`imax` est calculé plus haut : il sert aussi à `_direct_control`, qui souffrait du même
+        # défaut — patcher un seul des deux chemins est l'erreur classique de ce fichier.)
+        cmin = sum(d.charge_limit for d in devices if d.state != DeviceState.SOCFULL)
         sat_dis = house_net >= imax - db_on                             # déchargé à fond
-        sat_chg = house_net <= sum(d.charge_limit for d in devices) + db_on  # chargé à fond
+        sat_chg = house_net <= cmin + db_on                             # chargé à fond
         # --- GEL DE L'INTÉGRALE SUR TRAVERSÉE D'IDLE (26/07) ---
         # IDLE n'est pas un état de repos : la machine à états ci-dessus interdit CHARGE↔DISCHARGE en
         # direct, donc TOUTE inversion y transite. Remettre l'intégrale à 0 à chaque passage effaçait
@@ -1158,7 +1219,7 @@ class FondationEngine:
             f" slw{self.slew.asNumber}/{self.slew_down.asNumber} eng{self.min_engage.asNumber} ing{self.int_neg.asNumber}"
             f" cpr{self.chg_probe.asNumber} sur{self.surplus_on.asNumber}/{self.surplus_off.asNumber}"
             f" dws{self.dwell_sec.asNumber} sfd{self.sf_dismax.asNumber} idh{self.idle_hold.asNumber}"
-            f" dpr{self.dis_probe.asNumber} imin{self.int_min.asNumber}"
+            f" dpr{self.dis_probe.asNumber} imin{self.int_min.asNumber} wkg{self.wake_grace.asNumber}"
             f" tf{self.timefast.asNumber}/{self.timezero.asNumber}"
             f" load{FondationEngine.loads}/{id(self) & 0xFFFF:04x}"
         )
@@ -1186,7 +1247,7 @@ class FondationEngine:
             ("int_neg", self.int_neg), ("chg_probe", self.chg_probe), ("sur_on", self.surplus_on),
             ("sur_off", self.surplus_off), ("dwell", self.dwell_sec),
             ("sf_dismax", self.sf_dismax), ("idle_hold", self.idle_hold), ("dis_probe", self.dis_probe),
-            ("int_min", self.int_min),
+            ("int_min", self.int_min), ("wake_grace", self.wake_grace),
             ("timefast", self.timefast), ("timezero", self.timezero),
         ]
 

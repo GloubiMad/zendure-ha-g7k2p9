@@ -176,6 +176,9 @@
       "fondation_int_min": {
         "name": "· Integral min down-step (0=proportional)"
       },
+      "fondation_wake_grace": {
+        "name": "· Start-up grace period (0=off)"
+      },
       "fondation_slew": {
         "name": "· Slew-rate up (discharge)"
       },

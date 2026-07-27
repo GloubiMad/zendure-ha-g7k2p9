@@ -181,6 +181,9 @@
       "fondation_int_min": {
         "name": "· Pas mini descente intégrale (0=proportionnel)"
       },
+      "fondation_wake_grace": {
+        "name": "· Délai de grâce au démarrage (0=off)"
+      },
       "fondation_slew": {
         "name": "· Slew-rate montée (décharge)"
       },
