@@ -179,6 +179,9 @@
       "fondation_wake_grace": {
         "name": "· Start-up grace period (0=off)"
       },
+      "fondation_direct": {
+        "name": "· SOCFULL direct control (0=off, legacy)"
+      },
       "fondation_slew": {
         "name": "· Slew-rate up (discharge)"
       },

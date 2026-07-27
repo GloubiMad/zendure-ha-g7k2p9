@@ -354,6 +354,24 @@ class FondationEngine:
         # consigne retombe — il ne dépend PAS de la valeur de la consigne, donc le slew qui la fait
         # varier à chaque cycle ne le réarme pas indéfiniment.
         self.wake_grace = FondationNumber(m, "fondation_wake_grace", 15, 0, 60, "s")
+        # CHEMIN « CONTRÔLE DIRECT ». 0 = DÉSACTIVÉ (défaut depuis la 1.4.3.37) / 1 = actif.
+        #
+        # ⚠️ AUDIT DU 27/07 : `_direct_control()` est un SECOND MOTEUR, atteint par un `return`
+        # anticipé, et il n'a reçu AUCUN correctif de juillet — ni B, ni B-décharge, ni `int_min`,
+        # ni `_chg_ceiling`, ni `_dis_ceiling`, ni `_engage_ok`, ni les limites de fusegroup, ni le
+        # gel d'IDLE. Il ne s'exécute jamais dans la configuration actuelle (il exige un producteur
+        # PLEIN, qui PRODUIT, en gridReverse désactivé/interdit — glagla est en autorisé, et
+        # `forced=0` sur toutes les traces le confirme). C'est donc du code mort — mais qui
+        # s'activerait SANS PRÉVENIR au premier changement de mode avec batterie pleine, ramenant le
+        # moteur à son comportement de début juillet.
+        #
+        # On le neutralise plutôt que de le supprimer : le cas qu'il traite (producteur plein qui
+        # OBÉIT) est aujourd'hui couvert par le chemin normal — absent de `forced`, donc commandé à
+        # l'étape 1, surplus routé par l'étape 1bis, écrêtage assuré par le firmware — mais c'est un
+        # raisonnement de COUVERTURE, pas une mesure : le chemin ne s'exécutant jamais, on ne peut
+        # pas le comparer sur une trace réelle. Le remettre à 1 permettra de trancher le jour où le
+        # cas se présentera vraiment.
+        self.direct = FondationNumber(m, "fondation_direct", 0, 0, 1)
         # Bouton de DÉBLOCAGE : écrit `inverseMaxPower = sf_dismax` UNE fois sur le/les SolarFlow.
         # Bouton (et non automatisme) parce que cette propriété part en FLASH : elle doit être écrite
         # rarement et volontairement. Cf. `unlock_solarflow` pour la procédure complète.
@@ -599,7 +617,7 @@ class FondationEngine:
             return getattr(gr, "value", None) in (0, 2)  # désactivé/interdit obéissent ; autorisé déverse
 
         full_prod = [d for d in devices if d.state == DeviceState.SOCFULL and (self.pv_ema[d.deviceId] - ovh) > 0]
-        if full_prod and all(_obeys(d) for d in full_prod):
+        if self.direct.asNumber > 0 and full_prod and all(_obeys(d) for d in full_prod):
             forced, t_raw, t_reg = self._direct_control(devices, full_prod, hl_raw, ovh, p1, cmd, db_off, step, imax)
             await self._apply_and_report(devices, cmd, hl_raw, forced, t_raw, t_reg, p1)
             return
@@ -698,6 +716,13 @@ class FondationEngine:
         cmin = sum(d.charge_limit for d in devices if d.state != DeviceState.SOCFULL)
         sat_dis = house_net >= imax - db_on                             # déchargé à fond
         sat_chg = house_net <= cmin + db_on                             # chargé à fond
+        # ÉCRÊTAGE PERMANENT — et pas seulement au moment d'accumuler (trou de la 1.4.3.36).
+        # `sat_dis` empêche l'intégrale de MONTER quand plus rien n'est mobilisable, mais il ne la
+        # fait pas DESCENDRE : avec `imax` = 0, la vidange `max(imin, min(-p1, imax))` vaut 0 et la
+        # valeur accumulée AVANT que le parc se vide restait figée. C'est exactement ce qui s'est
+        # produit la nuit du 27/07 (intégrale à 4800 de 00 h à 08 h) : borner à l'entrée ne suffit
+        # pas, il faut borner l'ÉTAT. Uniquement par le HAUT : le plancher reste `int_neg` (B).
+        self.integral = min(self.integral, imax)
         # --- GEL DE L'INTÉGRALE SUR TRAVERSÉE D'IDLE (26/07) ---
         # IDLE n'est pas un état de repos : la machine à états ci-dessus interdit CHARGE↔DISCHARGE en
         # direct, donc TOUTE inversion y transite. Remettre l'intégrale à 0 à chaque passage effaçait
@@ -1220,6 +1245,7 @@ class FondationEngine:
             f" cpr{self.chg_probe.asNumber} sur{self.surplus_on.asNumber}/{self.surplus_off.asNumber}"
             f" dws{self.dwell_sec.asNumber} sfd{self.sf_dismax.asNumber} idh{self.idle_hold.asNumber}"
             f" dpr{self.dis_probe.asNumber} imin{self.int_min.asNumber} wkg{self.wake_grace.asNumber}"
+            f" dir{self.direct.asNumber}"
             f" tf{self.timefast.asNumber}/{self.timezero.asNumber}"
             f" load{FondationEngine.loads}/{id(self) & 0xFFFF:04x}"
         )
@@ -1247,7 +1273,7 @@ class FondationEngine:
             ("int_neg", self.int_neg), ("chg_probe", self.chg_probe), ("sur_on", self.surplus_on),
             ("sur_off", self.surplus_off), ("dwell", self.dwell_sec),
             ("sf_dismax", self.sf_dismax), ("idle_hold", self.idle_hold), ("dis_probe", self.dis_probe),
-            ("int_min", self.int_min), ("wake_grace", self.wake_grace),
+            ("int_min", self.int_min), ("wake_grace", self.wake_grace), ("direct", self.direct),
             ("timefast", self.timefast), ("timezero", self.timezero),
         ]
 
@@ -1290,7 +1316,23 @@ class FondationEngine:
 
     def _direct_control(self, devices, full_prod, base, ovh, p1, cmd, db_off, step, imax):
         """Producteur(s) plein(s) qui OBÉISSENT : on commande leur sortie = conso + charge encaissable,
-        on écrête le reste (0 export). Généralisé à N entités de stockage (parc futur)."""
+        on écrête le reste (0 export). Généralisé à N entités de stockage (parc futur).
+
+        ⚠️⚠️ DÉSACTIVÉ PAR DÉFAUT depuis la 1.4.3.37 (`fondation_direct` = 0). NE PAS RÉACTIVER
+        SANS AVOIR LU CECI. Ce chemin a divergé de `update()` — voici ce qui lui MANQUE encore :
+
+          - correctif B : intégrale négative bornée par `int_neg`   (ici : plancher `-imax`)
+          - correctif B décharge : descente proportionnelle          (ici : `min(-p1, step)`)
+          - `int_min` (1.4.3.35) : plancher de descente découplé de `step`
+          - `_chg_ceiling` : son `chg_cap` local n'a AUCUN plafond d'acceptation mesurée
+          - `_dis_ceiling` : les producteurs sont alloués sur la limite nominale
+          - `_engage_ok`   : un puits est réveillé pour n'importe quel montant
+          - `fuseGrp.maxpower` : non appliqué aux producteurs
+          - gel d'IDLE (`idle_hold`)
+
+        Seul l'anti-windup a été réaligné (27/07). Tant que le reste n'est pas propagé, réactiver
+        `fondation_direct` ramène le moteur au comportement de début juillet sur ce cas précis.
+        """
         forced = sum(max(0.0, self.pv_ema[d.deviceId] - ovh) for d in full_prod)  # solaire dispo des pleins
         if self._socfull_block:
             # BLOCK (#3) : producteur plein -> RIEN ne sort (maison sur réseau, 0 export). Peu utile.
@@ -1303,8 +1345,12 @@ class FondationEngine:
         # intégrateur P1 signé (résiduel overhead/rampe) avec ANTI-WINDUP : P1>0 import -> +sortie ;
         # P1<0 export -> -sortie ; mais on n'accumule PAS dans une direction déjà saturée.
         delivered = sum(d.homeOutput.asInt - d.homeInput.asInt for d in devices)
-        sat_dis = delivered >= sum(d.discharge_limit for d in devices) - db_off
-        sat_chg = delivered <= sum(d.charge_limit for d in devices) + db_off
+        # Capacité MOBILISABLE, comme dans `update()` (27/07). Ce chemin recalculait ses propres
+        # seuils sur la somme des PLAQUES : le `imax` corrigé qu'on lui passe ne servait qu'au
+        # plafond de l'intégrale, et l'anti-windup restait aveugle. Corrigé ici aussi pour que la
+        # réactivation de `fondation_direct` ne soit pas un piège.
+        sat_dis = delivered >= sum(d.discharge_limit for d in devices if d.state != DeviceState.SOCEMPTY) - db_off
+        sat_chg = delivered <= sum(d.charge_limit for d in devices if d.state != DeviceState.SOCFULL) + db_off
         if p1 > db_off and not sat_dis:
             self.integral = min(self.integral + min(p1, step), imax)
         elif p1 < -db_off and not sat_chg:
