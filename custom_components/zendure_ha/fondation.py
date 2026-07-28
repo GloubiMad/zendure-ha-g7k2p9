@@ -65,6 +65,10 @@ RAMP_RISE = 25.0
 # 40 W laissent la production remonter d'elle-même quand l'appareil refroidit, pour un biais
 # d'import résiduel négligeable.
 PROD_PROBE = 40.0
+# Bridage thermique (cf. `temp_max`) : largeur de la rampe et plancher du facteur.
+# 5 °C / 40 % => à seuil+1 on bride de 12 %, à seuil+3 de 36 %, à seuil+5 et au-delà de 60 %.
+TEMP_BAND = 5.0
+TEMP_FLOOR = 0.40
 
 
 class FondationNumber(ZendureRestoreNumber):
@@ -268,9 +272,40 @@ class FondationEngine:
         TRANSITER le PV gratuit d'un producteur vers une autre batterie : plafonner l'enverrait au
         réseau. Décision différente (éviter l'export), pas le même choix — l'exception est
         volontaire. Ni à `fuseGrp.maxpower`, qui est une limite électrique, pas un choix de charge.
+
+        Le bridage THERMIQUE (`temp_max`) se multiplie au plafond d'occupation, mais UNIQUEMENT en
+        décharge : c'est la sortie AC qui chauffe, pas la charge (cf. `temp_max`).
         """
         lim = float(-d.charge_limit if charge else d.discharge_limit)
-        return max(0.0, lim * self.occ)
+        thr = 1.0 if charge else self._thermal(d, applied=True)
+        return max(0.0, lim * self.occ * thr)
+
+    def _thermal(self, d: ZendureDevice, applied: bool = False) -> float:
+        """Facteur de bridage thermique de ce device (1,00 = libre, 0,40 = bridé au maximum).
+
+        Toujours CALCULÉ dès que `temp_max` > 0, pour être publié dans `thr=` ; n'est APPLIQUÉ que
+        si `temp_act` = 1. C'est ce qui permet d'observer sur trace réelle, sans rien changer au
+        comportement du moteur, combien de temps et de combien un appareil serait bridé.
+
+        Température lue sur `hyperTmp` — la même entité que la colonne `Tmp` de simulation.csv,
+        renseignée pour les trois appareils. Pas de température publiée => pas de bridage.
+
+        ⚠️ La température n'est émise par le device que lorsqu'elle CHANGE (flux delta MQTT) : un
+        intervalle d'émission long signifie qu'elle est stable, PAS qu'elle est périmée.
+        """
+        if (seuil := self.temp_max.asNumber) <= 0:
+            return 1.0
+        if applied and self.temp_act.asNumber <= 0:
+            return 1.0                       # mode observation : calculé mais pas appliqué
+        te = d.entities.get("hyperTmp")
+        tmp = getattr(te, "native_value", None) if te is not None else None
+        if tmp is None:
+            return 1.0                       # pas de mesure => on ne bride pas à l'aveugle
+        exces = float(tmp) - seuil
+        if exces <= 0:
+            return 1.0
+        # descente linéaire jusqu'au plancher, atteint à `seuil + TEMP_BAND`
+        return max(TEMP_FLOOR, 1.0 - (1.0 - TEMP_FLOOR) * min(1.0, exces / TEMP_BAND))
 
     def _dis_ceiling(self, d: ZendureDevice) -> float:
         """Plafond de DÉCHARGE basé sur la livraison MESURÉE (`prod_accept`), + marge de re-sondage.
@@ -530,6 +565,35 @@ class FondationEngine:
         # de 15 % d'un coup. La levée est donc CONTINUE (cf. `occ` dans `update`) : l'occupation vaut
         # le plafond, OU ce que la maison réclame si c'est plus. Monotone, sans discontinuité.
         self.load_max = FondationNumber(m, "fondation_load_max", 100, 50, 100, "%")
+        # BRIDAGE THERMIQUE PAR ONDULEUR (°C). 0 = fonction totalement inactive (défaut).
+        #
+        # Observé le 28/07 par 34 °C extérieurs : glagla à **66 °C** (67 au max du jour) pendant que
+        # `up` était à **33 °C sans rien faire** et le SolarFlow à 42 °C. Le parc avait donc une
+        # marge thermique considérable, inutilisée, pendant qu'un seul appareil cuisait.
+        #
+        # ⚠️ C'EST LA SORTIE AC QUI CHAUFFE, PAS LA CHARGE (constat terrain de l'utilisateur). Le
+        # bridage ne s'applique donc QU'EN DÉCHARGE : le PV du producteur bascule alors dans sa
+        # propre batterie, ce qui chauffe moins. Brider aussi la charge serait contre-productif.
+        #
+        # ⚠️ NE PAS REFAIRE la mesure « d'où vient la chaleur » par corrélation brute : au-dessus de
+        # 62 °C l'appareil DÉRATE, donc sa sortie baisse PARCE QU'il est chaud. On mesure alors la
+        # conséquence et on la prend pour la cause (j'ai obtenu r = −0,91 sur la sortie AC, soit
+        # l'inverse de la réalité). Le tableau « sortie basse = chaud » n'était que « matin froid
+        # contre après-midi chaud ». Il faut neutraliser le dérating avant toute conclusion.
+        #
+        # PROGRESSIF, JAMAIS BINAIRE : facteur 1,00 au seuil, décroissant linéairement jusqu'à
+        # TEMP_FLOOR à (seuil + TEMP_BAND). Un interrupteur tout-ou-rien sur une température
+        # fabriquerait un cycle lent chauffe→bride→refroidit→débride — exactement le défaut que ce
+        # fichier passe son temps à corriger (cf. `int_min`, `surplus_on`, `min_engage`).
+        #
+        # NON LEVABLE PAR LE BESOIN, contrairement à `load_max` : c'est une protection matérielle,
+        # elle ne se négocie pas contre la demande de la maison.
+        self.temp_max = FondationNumber(m, "fondation_temp_max", 0, 0, 80, "°C")
+        # 0 = OBSERVATION SEULE : le facteur est calculé et publié dans `thr=` de simulation.csv,
+        # mais PAS appliqué — le moteur se comporte exactement comme avant. 1 = appliqué.
+        # Permet de dimensionner le seuil sur trace réelle sans rien risquer, comme l'a été le
+        # module `diagnostic.py` (1.4.3.4) : la sonde d'abord, le correctif ensuite.
+        self.temp_act = FondationNumber(m, "fondation_temp_act", 0, 0, 1)
         # Bouton de DÉBLOCAGE : écrit `inverseMaxPower = sf_dismax` UNE fois sur le/les SolarFlow.
         # Bouton (et non automatisme) parce que cette propriété part en FLASH : elle doit être écrite
         # rarement et volontairement. Cf. `unlock_solarflow` pour la procédure complète.
@@ -1460,6 +1524,9 @@ class FondationEngine:
             f"fondation regime={self.regime.name} hl={int(hl_raw)} forced={int(forced)} T={int(t_raw)}"
             f" ema={int(t_reg)} amt={int(self.amt_ema) if self.amt_ema is not None else 0}"
             f" int={int(self.integral)} sp={setpoint} occ={self.occ:.2f}"
+            # `thr=` : facteur thermique par device, TOUJOURS calculé dès que `temp_max` > 0 (donc
+            # visible en mode observation, `temp_act`=0), pour dimensionner le seuil sans risque.
+            f" thr={'/'.join(f'{self._thermal(d):.2f}' for d in devices) if self.temp_max.asNumber > 0 else '-'}"
             f" prod={'/'.join(f'{int(self.drain_ema.get(d.deviceId, 0))}' for d in devices if self._is_producer(d, datetime.now())) or '-'}"
             f" acc={'/'.join(f'{int(self.chg_accept[d.deviceId])}' for d in devices if d.deviceId in self.chg_accept) or '-'}"
             f" liv={'/'.join(f'{int(self.prod_accept[d.deviceId])}' for d in devices if d.deviceId in self.prod_accept) or '-'}"
@@ -1495,7 +1562,7 @@ class FondationEngine:
             f" dws{self.dwell_sec.asNumber} sfd{self.sf_dismax.asNumber} idh{self.idle_hold.asNumber}"
             f" dpr{self.dis_probe.asNumber} imin{self.int_min.asNumber} wkg{self.wake_grace.asNumber}"
             f" dir{self.direct.asNumber} engc{self.min_engage_chg.asNumber}"
-            f" lmx{self.load_max.asNumber}"
+            f" lmx{self.load_max.asNumber} tmx{self.temp_max.asNumber}/{self.temp_act.asNumber}"
             f" tf{self.timefast.asNumber}/{self.timezero.asNumber}"
             f" load{FondationEngine.loads}/{id(self) & 0xFFFF:04x}"
         )
@@ -1525,6 +1592,7 @@ class FondationEngine:
             ("sf_dismax", self.sf_dismax), ("idle_hold", self.idle_hold), ("dis_probe", self.dis_probe),
             ("int_min", self.int_min), ("wake_grace", self.wake_grace), ("direct", self.direct),
             ("eng_chg", self.min_engage_chg), ("load_max", self.load_max),
+            ("temp_max", self.temp_max), ("temp_act", self.temp_act),
             ("timefast", self.timefast), ("timezero", self.timezero),
         ]
 

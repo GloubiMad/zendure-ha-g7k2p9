@@ -193,6 +193,12 @@
       "fondation_load_max": {
         "name": "· Occupation max des onduleurs (100=off)"
       },
+      "fondation_temp_max": {
+        "name": "· Température de bridage d'un onduleur (0=off)"
+      },
+      "fondation_temp_act": {
+        "name": "· Bridage thermique : 0=observer, 1=appliquer"
+      },
       "fondation_slew": {
         "name": "· Slew-rate montée (décharge)"
       },
