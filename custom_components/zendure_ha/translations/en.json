@@ -185,6 +185,9 @@
       "fondation_min_engage_chg": {
         "name": "· Charge engage threshold (0=off)"
       },
+      "fondation_load_max": {
+        "name": "· Max inverter load (100=off)"
+      },
       "fondation_slew": {
         "name": "· Slew-rate up (discharge)"
       },

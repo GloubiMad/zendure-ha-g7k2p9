@@ -183,6 +183,7 @@ class FondationEngine:
         self.clead: dict[str, bool] = {}       # hystérésis sticky par device (charge)
         self.floor: dict[str, bool] = {}       # hystérésis de plancher SoC (sticky jusqu'à minSoc+3)
         self.surplus_active = False            # hystérésis du routage de surplus solaire (anti flip-flap)
+        self.occ = 1.0                         # taux d'occupation autorisé du parc (cf. `load_max`)
         self.idle_since: datetime | None = None      # instant d'entrée en IDLE (gel de l'intégrale)
         self.idle_regime: ManagerState | None = None  # régime AVANT l'entrée en IDLE (anti-contamination)
         self.dir_prev: dict[str, float] = {}   # dernière consigne appliquée (dwell d'inversion)
@@ -250,6 +251,27 @@ class FondationEngine:
             return True
         return take >= (me / 2 if abs(self.cmd_applied.get(d.deviceId, 0)) > 0 else me)
 
+    def _pmax(self, d: ZendureDevice, charge: bool = False) -> float:
+        """Puissance MAXIMALE qu'on s'autorise à demander à ce device (W, toujours positif).
+
+        SEUL endroit où le plafond d'occupation `load_max` est appliqué — cf. sa déclaration pour
+        les mesures. Tout ce qui décide « combien ce device peut-il travailler » passe par ici :
+        `_dis_ceiling`, `_chg_ceiling`, et les capacités mobilisables `imax`/`cmin`.
+
+        ⚠️ `imax`/`cmin` DOIVENT suivre. `imax` porte trois rôles (anti-windup, plafond de
+        l'intégrale, plafond de la descente) : si les plafonds de dispatch baissent sans que la
+        capacité mobilisable baisse aussi, l'intégrale s'accumule contre une puissance qu'on a
+        décidé de ne pas utiliser. C'est mot pour mot le bug corrigé en 1.4.3.36/.37 — la même
+        décision écrite à deux endroits, un seul corrigé.
+
+        ⚠️ NE s'applique PAS au routage du surplus solaire (`prod_extra`, deux sites). Là on fait
+        TRANSITER le PV gratuit d'un producteur vers une autre batterie : plafonner l'enverrait au
+        réseau. Décision différente (éviter l'export), pas le même choix — l'exception est
+        volontaire. Ni à `fuseGrp.maxpower`, qui est une limite électrique, pas un choix de charge.
+        """
+        lim = float(-d.charge_limit if charge else d.discharge_limit)
+        return max(0.0, lim * self.occ)
+
     def _dis_ceiling(self, d: ZendureDevice) -> float:
         """Plafond de DÉCHARGE basé sur la livraison MESURÉE (`prod_accept`), + marge de re-sondage.
 
@@ -262,8 +284,8 @@ class FondationEngine:
         `dis_probe` = 3000 (défaut) neutralise ce plafond : comportement historique inchangé.
         """
         if (acc := self.prod_accept.get(d.deviceId)) is None:
-            return float(d.discharge_limit)
-        return min(float(d.discharge_limit), acc + self.dis_probe.asNumber)
+            return self._pmax(d)
+        return min(self._pmax(d), acc + self.dis_probe.asNumber)
 
     def _chg_ceiling(self, d: ZendureDevice) -> float:
         """Plafond de charge basé sur l'ACCEPTATION MESURÉE, + une marge de ré-exploration.
@@ -279,8 +301,8 @@ class FondationEngine:
         continue, sans le bang-bang qu'un seuil binaire fabriquerait (cf. 1.4.3.11).
         """
         if (acc := self.chg_accept.get(d.deviceId)) is None:
-            return float(-d.charge_limit)
-        return min(float(-d.charge_limit), acc + self.chg_probe.asNumber)
+            return self._pmax(d, charge=True)
+        return min(self._pmax(d, charge=True), acc + self.chg_probe.asNumber)
 
     def _bypass_blocks(self, d: ZendureDevice) -> bool:
         """Le bypass disqualifie de l'ABSORPTION les seuls PRODUCTEURS.
@@ -463,6 +485,51 @@ class FondationEngine:
         # Les PRODUCTEURS en sont exemptés (`_engage_ok`) : déjà allumés, les engager ne coûte
         # aucun cycle supplémentaire.
         self.min_engage_chg = FondationNumber(m, "fondation_min_engage_chg", 500, 0, 1000, "W")
+        # PLAFOND D'OCCUPATION DU PARC (% de la plaque signalétique). 100 = OFF = comportement antérieur.
+        #
+        # ⚠️ UN ONDULEUR TENU À FOND DÉRATE, SANS RIEN ANNONCER. Nuit du 27/07, sèche-linge puis
+        # cumulus, le SolarFlow commandé à 2400 W en continu :
+        #     21:30  consigne 2351  livré 2331  (−21 W)   Tmp 36,8
+        #     22:20  consigne 2380  livré 2358  (−22 W)   Tmp 58,5
+        #     22:30  consigne 2390  livré 2287  (−104 W)  Tmp 59,9
+        #     22:50  consigne 2395  livré 2211  (−185 W)  Tmp 60,0
+        #     23:20  consigne 2400  livré 2171  (−229 W)  Tmp 60,0
+        # Une heure à pleine puissance suffit à atteindre 60,0 °C, où la température SE FIGE au
+        # dixième — signature d'un régulateur thermique — et la livraison décroche. Le moteur, lui,
+        # croit la demande couverte : import permanent, invisible. (Le SoC baisse en parallèle, donc
+        # les deux effets sont confondus sur cette nuit-là ; mais à 57 °C avec SoC 62 % le ratio
+        # livré/commandé vaut encore 0,99, et la cassure suit la TEMPÉRATURE, pas le SoC.)
+        #
+        # CE N'EST PAS PROPRE AU SolarFlow. Température médiane selon le taux d'occupation, sur les
+        # 18 h de la trace :
+        #     occupation     SolarFlow   glagla
+        #        ~25 %          34 °C     31 °C
+        #        ~58 %            —       34 °C
+        #        ~79 %          48 °C     34 °C  (à 75 %)
+        #        ~88 %          53 °C       —
+        #        ~96 %          55 °C       —            (max 60 = plafond)
+        #        ~92 %            —       61 °C          (plafond 63)
+        # glagla reste à 34 °C jusqu'à 75 % d'occupation et saute à 61 °C entre 1000 et 1200 W.
+        # Le seuil est au même endroit sur les deux machines : ~85 % est le dernier point froid.
+        #
+        # EFFET DE BORD RECHERCHÉ — LE CYCLAGE. Le partage est en CASCADE : le device au « genou »
+        # encaisse 100 % de la variation de la consigne. Tant que le SolarFlow bute sur 2400, le
+        # genou est à 2400 et glagla tombe à 0 W dès que la consigne passe dessous. Rejeu du partage
+        # sur la vraie série de consignes du 27/07 21h36-23h (84 min) :
+        #     plafond   glagla à 0 W   bascules on/off   σ(consigne glagla)
+        #       100 %        16 %            471               289
+        #        85 %         2 %             75               287
+        #        80 %         1 %             21               247
+        # Le plafond ne réduit PAS l'amplitude du balancement (σ inchangé) : il déplace le genou de
+        # 2400 à 2040, et comme la consigne passe rarement sous 2040 (p5 = 2140), glagla cesse de
+        # toucher la butée 0. Six fois moins d'allumages/extinctions de l'onduleur.
+        #
+        # « POUSSER SI ÇA NE SUFFIT PAS » — SURTOUT PAS UN INTERRUPTEUR. Lever le plafond par un
+        # test binaire « besoin > capacité plafonnée » fabriquerait exactement le défaut qu'on
+        # corrige depuis une semaine : un seuil que le besoin traverse fait sauter tous les plafonds
+        # de 15 % d'un coup. La levée est donc CONTINUE (cf. `occ` dans `update`) : l'occupation vaut
+        # le plafond, OU ce que la maison réclame si c'est plus. Monotone, sans discontinuité.
+        self.load_max = FondationNumber(m, "fondation_load_max", 100, 50, 100, "%")
         # Bouton de DÉBLOCAGE : écrit `inverseMaxPower = sf_dismax` UNE fois sur le/les SolarFlow.
         # Bouton (et non automatisme) parce que cette propriété part en FLASH : elle doit être écrite
         # rarement et volontairement. Cf. `unlock_solarflow` pour la procédure complète.
@@ -634,9 +701,35 @@ class FondationEngine:
         db_off = self.db_off.asNumber
         ft = self.fast_track.asNumber
         step = self.step.asNumber
+        # --- TAUX D'OCCUPATION AUTORISÉ (cf. `load_max` pour les mesures thermiques) ---
+        # Calculé AVANT tout le reste : `_pmax` s'en sert, donc `_dis_ceiling`, `_chg_ceiling`,
+        # `imax` et `cmin` en dépendent tous. Un seul calcul, un seul chiffre, quatre consommateurs.
+        #
+        # LEVÉE CONTINUE, pas un interrupteur : l'occupation vaut le plafond réglé, OU ce que la
+        # maison réclame si c'est plus. `max(plafond, besoin/capacité)` est monotone et continu en
+        # `besoin` — traverser le point où le plafond cesse de mordre ne fait rien sauter.
+        #     besoin 2842 W / 4800 W nominal -> 0,59 -> occ = 0,85  (le plafond mord)
+        #     besoin 4500 W / 4800 W nominal -> 0,94 -> occ = 0,94  (4500 W disponibles, pile)
+        #
+        # BESOIN = `hl_ema`, le house_load LISSÉ, et pris tel qu'il était au cycle PRÉCÉDENT : il
+        # n'est recalculé que plus bas (après `forced`), et réordonner `update` pour l'avoir ici
+        # serait un changement autrement plus risqué que ce retard d'un cycle (~1 s) sur une
+        # grandeur lissée qui ne sert qu'à décider si le plafond doit se relâcher.
+        # Au tout premier cycle `hl_ema` est None : `occ` reste à sa valeur d'init (1.0), soit
+        # le comportement historique — jamais de bridage sur une grandeur pas encore mesurée.
+        if (lm := self.load_max.asNumber) < 100 and self.hl_ema is not None:
+            besoin = abs(self.hl_ema)
+            nominal = sum(
+                float(-d.charge_limit if self.hl_ema < 0 else d.discharge_limit) for d in devices
+            )
+            self.occ = max(lm / 100.0, min(1.0, besoin / nominal)) if nominal > 0 else 1.0
+        else:
+            self.occ = 1.0
         # Capacité mobilisable — calculée UNE fois ici, car elle part aussi dans `_direct_control`.
         # Cf. le commentaire détaillé plus bas (bug de l'anti-windup, nuit du 27/07).
-        imax = sum(d.discharge_limit for d in devices if d.state != DeviceState.SOCEMPTY)
+        # `_pmax` (et non `discharge_limit`) : le plafond d'occupation doit valoir ici AUSSI, sinon
+        # l'intégrale se charge contre une puissance qu'on ne commandera pas — cf. `_pmax`.
+        imax = sum(self._pmax(d) for d in devices if d.state != DeviceState.SOCEMPTY)
 
         # --- pv-EMA par device (lisse le PV utilisé partout, sans lisser le total) ---
         palpha = max(0.05, min(1.0, self.pv_alpha.asNumber / 100.0))
@@ -837,7 +930,9 @@ class FondationEngine:
         # est exactement le comportement voulu.
         # (`imax` est calculé plus haut : il sert aussi à `_direct_control`, qui souffrait du même
         # défaut — patcher un seul des deux chemins est l'erreur classique de ce fichier.)
-        cmin = sum(d.charge_limit for d in devices if d.state != DeviceState.SOCFULL)
+        # Jumeau de `imax` côté charge : même plafond d'occupation, sinon l'anti-windup de la
+        # branche CHARGE resterait calibré sur des plaques signalétiques qu'on n'utilise plus.
+        cmin = -sum(self._pmax(d, charge=True) for d in devices if d.state != DeviceState.SOCFULL)
         sat_dis = house_net >= imax - db_on                             # déchargé à fond
         sat_chg = house_net <= cmin + db_on                             # chargé à fond
         # ÉCRÊTAGE PERMANENT — et pas seulement au moment d'accumuler (trou de la 1.4.3.36).
@@ -1175,8 +1270,17 @@ class FondationEngine:
                 # réseau pendant 50 s alors que up avait 77 % de place libre et 1200 W de capacité.
                 # Le plafonner ici fait DÉBORDER le reliquat sur le device suivant dès le 1er cycle
                 # (`rem` n'est décrémenté que du `take` réellement alloué).
+                #
+                # ⚠️ `+ cmd[d]` SUR LE PLAFOND AUSSI (28/07). Cette fonction renvoie la place ENCORE
+                # disponible : les deux premiers termes en tiennent compte, le troisième était
+                # ABSOLU. Quand le device a déjà reçu une part, `_chg_ceiling` ne la déduisait pas —
+                # sans conséquence tant qu'il n'était pas le terme contraignant et que chaque device
+                # n'était visité qu'une fois, mais faux dès la 2e passe (`parallel`) et dans le
+                # `room_left` recalculé après allocation. `load_max` rend justement `_chg_ceiling`
+                # contraignant en permanence : la latence serait devenue un vrai dépassement de
+                # plafond. Sur le chemin principal (une visite, `cmd[d]` = 0) c'est un no-op exact.
                 used = fuse_used.get(d.fuseGrp, 0.0)
-                return max(0.0, min(-d.charge_limit + cmd[d], -d.fuseGrp.minpower - used, self._chg_ceiling(d)))
+                return max(0.0, min(-d.charge_limit + cmd[d], -d.fuseGrp.minpower - used, self._chg_ceiling(d) + cmd[d]))
 
             cstrat = self.charge_strategy.value
             if cstrat == 3:  # parallel : prorata place (100−SoC)×capacité, reliquat en 2e passe
@@ -1355,7 +1459,7 @@ class FondationEngine:
         self.debug = (
             f"fondation regime={self.regime.name} hl={int(hl_raw)} forced={int(forced)} T={int(t_raw)}"
             f" ema={int(t_reg)} amt={int(self.amt_ema) if self.amt_ema is not None else 0}"
-            f" int={int(self.integral)} sp={setpoint}"
+            f" int={int(self.integral)} sp={setpoint} occ={self.occ:.2f}"
             f" prod={'/'.join(f'{int(self.drain_ema.get(d.deviceId, 0))}' for d in devices if self._is_producer(d, datetime.now())) or '-'}"
             f" acc={'/'.join(f'{int(self.chg_accept[d.deviceId])}' for d in devices if d.deviceId in self.chg_accept) or '-'}"
             f" liv={'/'.join(f'{int(self.prod_accept[d.deviceId])}' for d in devices if d.deviceId in self.prod_accept) or '-'}"
@@ -1391,6 +1495,7 @@ class FondationEngine:
             f" dws{self.dwell_sec.asNumber} sfd{self.sf_dismax.asNumber} idh{self.idle_hold.asNumber}"
             f" dpr{self.dis_probe.asNumber} imin{self.int_min.asNumber} wkg{self.wake_grace.asNumber}"
             f" dir{self.direct.asNumber} engc{self.min_engage_chg.asNumber}"
+            f" lmx{self.load_max.asNumber}"
             f" tf{self.timefast.asNumber}/{self.timezero.asNumber}"
             f" load{FondationEngine.loads}/{id(self) & 0xFFFF:04x}"
         )
@@ -1419,7 +1524,7 @@ class FondationEngine:
             ("sur_off", self.surplus_off), ("dwell", self.dwell_sec),
             ("sf_dismax", self.sf_dismax), ("idle_hold", self.idle_hold), ("dis_probe", self.dis_probe),
             ("int_min", self.int_min), ("wake_grace", self.wake_grace), ("direct", self.direct),
-            ("eng_chg", self.min_engage_chg),
+            ("eng_chg", self.min_engage_chg), ("load_max", self.load_max),
             ("timefast", self.timefast), ("timezero", self.timezero),
         ]
 
@@ -1475,8 +1580,11 @@ class FondationEngine:
           - `_engage_ok`   : un puits est réveillé pour n'importe quel montant
           - `fuseGrp.maxpower` : non appliqué aux producteurs
           - gel d'IDLE (`idle_hold`)
+          - `load_max` : la répartition locale (`chg_cap`, l. `min(-d.charge_limit, …)` et les
+            consignes producteurs) alloue toujours sur la PLAQUE, hors anti-windup
 
-        Seul l'anti-windup a été réaligné (27/07). Tant que le reste n'est pas propagé, réactiver
+        L'anti-windup (27/07) et son plafond d'occupation (28/07) ont été réalignés. Tant que le
+        reste n'est pas propagé, réactiver
         `fondation_direct` ramène le moteur au comportement de début juillet sur ce cas précis.
         """
         forced = sum(max(0.0, self.pv_ema[d.deviceId] - ovh) for d in full_prod)  # solaire dispo des pleins
@@ -1495,8 +1603,10 @@ class FondationEngine:
         # seuils sur la somme des PLAQUES : le `imax` corrigé qu'on lui passe ne servait qu'au
         # plafond de l'intégrale, et l'anti-windup restait aveugle. Corrigé ici aussi pour que la
         # réactivation de `fondation_direct` ne soit pas un piège.
-        sat_dis = delivered >= sum(d.discharge_limit for d in devices if d.state != DeviceState.SOCEMPTY) - db_off
-        sat_chg = delivered <= sum(d.charge_limit for d in devices if d.state != DeviceState.SOCFULL) + db_off
+        # `_pmax` comme dans `update()` : le plafond d'occupation (`load_max`) vaut ici aussi, sinon
+        # ce chemin rouvrirait exactement l'écart qu'on vient de refermer entre les deux moteurs.
+        sat_dis = delivered >= sum(self._pmax(d) for d in devices if d.state != DeviceState.SOCEMPTY) - db_off
+        sat_chg = delivered <= -sum(self._pmax(d, charge=True) for d in devices if d.state != DeviceState.SOCFULL) + db_off
         if p1 > db_off and not sat_dis:
             self.integral = min(self.integral + min(p1, step), imax)
         elif p1 < -db_off and not sat_chg:
