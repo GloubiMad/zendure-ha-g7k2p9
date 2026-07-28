@@ -37,7 +37,29 @@ from .sensor import ZendureRestoreSensor, ZendureSensor
 _LOGGER = logging.getLogger(__name__)
 
 CONST_HEADER = {"content-type": "application/json; charset=UTF-8"}
-CONST_TIMEOUT = ClientTimeout(total=4)
+# DÉLAI D'ATTENTE HTTP — 4 s à l'amont, ramené à 1 s le 28/07/2026 sur mesure.
+#
+# ⚠️ Ces deux appels (`httpGet`/`httpPost`) ne concernent QUE le SolarFlow (`ZendureZenSdk`), mais
+# ils sont AWAIT dans le cycle commun : tant qu'ils n'ont pas rendu la main, le moteur ne commande
+# RIEN — y compris les Hyper, qui sont pourtant joignables en MQTT et accusent réception en 184 ms.
+# Un seul appareil injoignable gelait donc la régulation des deux autres.
+#
+# Mesuré sur 21 h de trace (champ `ms=` de simulation.csv) :
+#   - fonctionnement normal : calcul moteur 0,2 ms, cycle complet (httpGet compris) médiane 19 ms,
+#     p99 118 ms ;
+#   - 19 épisodes de non-réponse du SolarFlow, 159 s cumulées (0,21 % du temps), les plus longs
+#     durant 22 à 31 s ;
+#   - pendant ceux-ci, valeurs EXACTEMENT 4001 ms (httpPost seul) et 8003 ms (httpGet + httpPost),
+#     signature d'un délai d'attente, pas d'une surcharge.
+#
+# 1 s laisse ~8× de marge sur le pire cas normal (p99 = 118 ms) et ramène le gel maximal de 8 s à
+# 2 s. On ne descend pas plus bas : une requête HTTP sur un réseau chargé peut légitimement prendre
+# 300-400 ms, et un délai trop court fabriquerait des échecs là où il n'y en avait pas.
+#
+# ⚠️ Effet de bord à connaître : sur exception, `httpGet`/`httpPost` posent `lastseen = datetime.min`,
+# ce qui fait passer le champ `Age` du CSV à −1 (« jamais vu »). Ce −1 est donc la CONSÉQUENCE du
+# délai dépassé, jamais la preuve que l'appareil a décroché.
+CONST_TIMEOUT = ClientTimeout(total=1)
 SF_COMMAND_CHAR = "0000c304-0000-1000-8000-00805f9b34fb"
 
 
