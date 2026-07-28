@@ -188,12 +188,6 @@
       "fondation_load_max": {
         "name": "· Max inverter load (100=off)"
       },
-      "fondation_temp_max": {
-        "name": "· Inverter throttle temperature (0=off)"
-      },
-      "fondation_temp_act": {
-        "name": "· Thermal throttle: 0=observe, 1=apply"
-      },
       "fondation_slew": {
         "name": "· Slew-rate up (discharge)"
       },
