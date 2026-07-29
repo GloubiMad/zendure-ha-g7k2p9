@@ -251,6 +251,18 @@ class FondationEngine:
             return True
         return take >= (me / 2 if abs(self.cmd_applied.get(d.deviceId, 0)) > 0 else me)
 
+    @staticmethod
+    def _tag(i: int, d: ZendureDevice) -> str:
+        """Étiquette courte et NON AMBIGUË d'un device pour les champs de `simulation.csv`.
+
+        `rang dans la liste` + 4 lettres du dernier mot du nom : « 0Pro », « 1glag », « 2up ».
+        Le rang lève l'ambiguïté si deux appareils portent un nom proche ; les lettres restent
+        lisibles à l'œil. Indispensable parce que `acc=`/`liv=` ne listent QUE les devices déjà
+        mesurés : sans préfixe, on ne sait pas à qui appartient la k-ième valeur.
+        """
+        mot = d.name.split()[-1] if d.name else "?"
+        return f"{i}{mot[:4]}"
+
     def _pmax(self, d: ZendureDevice, charge: bool = False) -> float:
         """Puissance MAXIMALE qu'on s'autorise à demander à ce device (W, toujours positif).
 
@@ -1460,9 +1472,18 @@ class FondationEngine:
             f"fondation regime={self.regime.name} hl={int(hl_raw)} forced={int(forced)} T={int(t_raw)}"
             f" ema={int(t_reg)} amt={int(self.amt_ema) if self.amt_ema is not None else 0}"
             f" int={int(self.integral)} sp={setpoint} occ={self.occ:.2f}"
-            f" prod={'/'.join(f'{int(self.drain_ema.get(d.deviceId, 0))}' for d in devices if self._is_producer(d, datetime.now())) or '-'}"
-            f" acc={'/'.join(f'{int(self.chg_accept[d.deviceId])}' for d in devices if d.deviceId in self.chg_accept) or '-'}"
-            f" liv={'/'.join(f'{int(self.prod_accept[d.deviceId])}' for d in devices if d.deviceId in self.prod_accept) or '-'}"
+            # ⚠️ CHAQUE VALEUR EST PRÉFIXÉE DU DEVICE (28/07). Ces trois champs ne listaient que les
+            # devices DÉJÀ mesurés : 1 ou 2 valeurs pour 3 appareils, sans moyen de savoir à qui
+            # elles appartenaient. Un contrôle qui indexait par position sortait de FAUSSES
+            # violations. Le préfixe est `rang` + 4 lettres du dernier mot du nom : non ambigu même
+            # si deux appareils portent un nom proche, et stable si un device disparaît de la liste.
+            f" prod={'/'.join(f'{self._tag(i, d)}:{int(self.drain_ema.get(d.deviceId, 0))}' for i, d in enumerate(devices) if self._is_producer(d, datetime.now())) or '-'}"
+            f" acc={'/'.join(f'{self._tag(i, d)}:{int(self.chg_accept[d.deviceId])}' for i, d in enumerate(devices) if d.deviceId in self.chg_accept) or '-'}"
+            f" liv={'/'.join(f'{self._tag(i, d)}:{int(self.prod_accept[d.deviceId])}' for i, d in enumerate(devices) if d.deviceId in self.prod_accept) or '-'}"
+            # ÉTAT + consigne par device : permet de repérer une consigne de CHARGE envoyée à un
+            # appareil PLEIN sans avoir à recouper les colonnes (le champ debug a un cycle de retard
+            # sur elles, ce qui rend tout recoupement fragile).
+            f" st={'/'.join(f'{self._tag(i, d)}:{d.state.name[:5]}{int(cmd.get(d, 0)):+d}' for i, d in enumerate(devices))}"
             f" strat={self.discharge_strategy.value}/{self.charge_strategy.value}{ms}"
             f"{self._params()}"
         )
