@@ -3,8 +3,15 @@
 But : détecter un device qui ne publie plus de PROPRIÉTÉS et l'escalader progressivement pour le
 réveiller, en MESURANT ce qui marche réellement.
 
-⚠️ Le PINGREQ keepalive ne met PAS à jour `lastseen` (seul `mqttProperties` le fait) : « muet » ≠
-« déconnecté ». L'intégration ne peut donc distinguer veille et plantage qu'en SONDANT le device.
+⚠️ Le PINGREQ keepalive ne met à jour aucune des deux fraîcheurs : « muet » ≠ « déconnecté ».
+L'intégration ne peut donc distinguer veille et plantage qu'en SONDANT le device.
+
+⚠️ CE MODULE SURVEILLE `lastreport`, PAS `lastseen` (29/07). Les deux ne répondent pas à la même
+question : `lastseen` dit « la liaison répond » (posé aussi par les accusés `*/reply`, qui arrivent
+en 184 ms après chaque consigne), `lastreport` dit « l'état est rapporté » (posé uniquement par
+`properties/report`). Le watchdog doit se fier au SECOND, sinon un appareil qui accuse encore
+réception mais ne publie plus son état passerait pour sain — c'est exactement le mode de panne du
+bug TLS (cf. `hyper-firmware-cipher-mqtt`), où glagla répondait au réseau tout en restant 47 s muet.
 
 Escalade (seuils en secondes, entités number À CHAUD du Manager) — chaque probe DIFFÈRE du précédent,
 car un firmware bugué peut ignorer une commande identique à la précédente (no-op) :
@@ -113,7 +120,7 @@ class MqttWatchdog:
         for d in self.manager.devices:
             st = self.state(d)
 
-            if d.lastseen == datetime.min:
+            if d.lastreport == datetime.min:
                 if st.stage != 0:  # jamais vu / marqué hors-ligne ailleurs -> reset état
                     st.stage = 0
                     st.stale_since = None
@@ -122,7 +129,7 @@ class MqttWatchdog:
                     self._set(d, "stalled", 0)
                 continue
 
-            stale = int((now - (d.lastseen - timedelta(minutes=5))).total_seconds())
+            stale = int((now - (d.lastreport - timedelta(minutes=5))).total_seconds())
             self._set(d, "silence", stale if stale > t_getall else 0)
             self._set(d, "broker", "cloud" if getattr(d.connection, "value", 1) == 0 else "local")
 
@@ -131,7 +138,7 @@ class MqttWatchdog:
                 if st.stage != 0:
                     # attribution HONNÊTE : un probe n'est crédité que si le device a republié
                     # dans les WD_RESPONSE s qui l'ont suivi ; sinon reprise spontanée (ou reset manuel).
-                    last_msg = d.lastseen - timedelta(minutes=5)
+                    last_msg = d.lastreport - timedelta(minutes=5)
                     if st.probe_at is not None and 0 <= (last_msg - st.probe_at).total_seconds() <= WD_RESPONSE:
                         wake_by = st.probe_kind
                     else:
@@ -221,8 +228,8 @@ class MqttWatchdog:
         st.ble_running = True
         try:
             # garde d'entrée : si le device a reparlé récemment, ne rien toucher
-            if d.lastseen != datetime.min:
-                stale = (datetime.now() - (d.lastseen - timedelta(minutes=5))).total_seconds()
+            if d.lastreport != datetime.min:
+                stale = (datetime.now() - (d.lastreport - timedelta(minutes=5))).total_seconds()
                 if stale < WD_RECENT:
                     _LOGGER.info("Watchdog %s: a reparlé avant le toggle BLE -> annulé", d.name)
                     return

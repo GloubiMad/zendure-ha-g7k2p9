@@ -145,7 +145,13 @@ class SimulationLog:
                     tsolar += (pwr_solar := d.solarInput.asInt)
                     thome += (pwr_home := d.homeOutput.asInt - d.homeInput.asInt)
                     # St = DeviceState (0=OFFLINE 1=SOCEMPTY 2=INACTIVE 3=SOCFULL 4=ACTIVE)
-                    age = int((time - (d.lastseen - timedelta(minutes=5))).total_seconds()) if d.lastseen != datetime.min else -1
+                    # ⚠️ `Age` suit `lastreport` (dernier `properties/report`), PAS `lastseen`.
+                    # Depuis le 29/07 `lastseen` est aussi rafraîchi par les accusés `*/reply`, qui
+                    # arrivent 184 ms après chaque consigne : l'y brancher rendrait `Age` toujours
+                    # nul et CHANGERAIT le sens de la colonne sans prévenir, faussant toute
+                    # comparaison avec les traces antérieures. `Age` garde donc exactement sa
+                    # définition d'origine : secondes depuis la dernière remontée d'ÉTAT.
+                    age = int((time - (d.lastreport - timedelta(minutes=5))).total_seconds()) if d.lastreport != datetime.min else -1
                     # Grid = gridReverse (0=disabled 1=allow 2=forbidden ; -1 si non reçu).
                     # ⚠️ DEUX notions distinctes sous des noms voisins, ne pas les confondre :
                     #   Byp  = `exports_bypass`, simple booléen dérivé de gridReverse (== allow) ;

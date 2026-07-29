@@ -146,7 +146,17 @@ class ZendureDevice(EntityDevice):
         self.topic_function = f"iot/{self.prodkey}/{self.deviceId}/function/invoke"
 
         self.batteries: dict[str, ZendureBattery | None] = {}
+        # DEUX FRAÎCHEURS DISTINCTES (29/07) — elles ne répondent pas à la même question :
+        #   `lastseen`   : « la LIAISON répond » — posé par `properties/report` ET par les accusés
+        #                  (`function/invoke/reply`, `properties/read/reply`). Décide si le device
+        #                  est OFFLINE, donc s'il reste dans la liste du moteur.
+        #   `lastreport` : « l'ÉTAT est rapporté » — posé UNIQUEMENT par `properties/report`.
+        #                  C'est ce que doit surveiller le watchdog.
+        # Les confondre laisserait passer le mode de panne du bug TLS : un appareil qui répond
+        # encore mais ne publie plus son état paraîtrait sain. Même convention pour les deux :
+        # la valeur stockée est « instant du dernier message + 5 min ».
         self.lastseen = datetime.min
+        self.lastreport = datetime.min
         self._messageid = 0
         self.kWh = 0.0
 
@@ -350,6 +360,9 @@ class ZendureDevice(EntityDevice):
         self.mqttPublish(self.topic_function, command)
 
     async def mqttProperties(self, payload: Any) -> None:
+        # Un `properties/report` prouve les DEUX : la liaison répond ET l'état est rapporté.
+        # Les accusés (`*/reply`), eux, ne posent que `lastseen` — cf. `mqttMessage`.
+        self.lastreport = datetime.now() + timedelta(minutes=5)
         if self.lastseen == datetime.min:
             self.lastseen = datetime.now() + timedelta(minutes=5)
             self.setStatus()
@@ -392,6 +405,27 @@ class ZendureDevice(EntityDevice):
                 case "properties/report":
                     asyncio.run_coroutine_threadsafe(self.mqttProperties(payload), self.hass.loop)
                     # self.mqttProperties(payload)
+
+                # ACCUSÉS DE RÉCEPTION — traités depuis le 29/07, ils étaient JETÉS.
+                #
+                # Mesuré au sniff du broker : le device accuse CHAQUE consigne en **184 ms** sur
+                # `function/invoke/reply` (30 réponses pour 30 consignes) et répond au `getAll` en
+                # 230 ms sur `properties/read/reply`. Ces messages ne portent pas d'état, mais ils
+                # prouvent deux choses : la liaison fonctionne, et la commande est arrivée.
+                #
+                # ⚠️ POURQUOI C'EST IMPORTANT — LE CLIQUET DU SILENCE. Un Hyper ne publie QUE
+                # lorsqu'une valeur change : à l'arrêt il n'a rien à dire, donc il se tait. Au bout
+                # de 5 min `lastseen` expire (`power_get`), il passe OFFLINE, et `fondation.py`
+                # l'ÉCARTE de la liste des devices. Plus aucune consigne ne lui est envoyée, donc
+                # plus rien ne change chez lui, donc il reste muet : la boucle est fermée.
+                # Mesuré le 29/07 sur `up` : OFFLINE 26 % de la journée, acceptation de charge figée
+                # à 130 W (min = max sur 29 100 cycles) pour une capacité de 1200 W.
+                #
+                # On rafraîchit donc `lastseen` sur les accusés. Le `getAll` périodique suffit alors
+                # à le maintenir dans le moteur, même parfaitement immobile.
+                case "function/invoke/reply" | "properties/read/reply":
+                    self.lastseen = datetime.now() + timedelta(minutes=5)
+                    return True
 
                 case "register/replay":
                     _LOGGER.info("Register replay for %s => %s", self.name, payload)
