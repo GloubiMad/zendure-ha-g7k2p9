@@ -1042,8 +1042,29 @@ class FondationEngine:
         # encaisse tout son solaire en interne. Sans ça, en IDLE on commandait 0 -> glagla encaissait
         # 975 W et up ne recevait rien (et le régime flappait sur le bruit P1). En IDLE l'intégrale est
         # nulle et demand ≈ 0 : l'étape 1) ne prend rien, seule l'étape 1bis route le surplus.
+        #
+        # ⚠️ 1.4.3.46 — « EN IDLE L'INTÉGRALE EST NULLE » N'EST PLUS VRAI DEPUIS `idle_hold`.
+        # La phrase ci-dessus décrit l'invariante d'origine (RAZ systématique en IDLE). Depuis la
+        # 1.4.3.32, `idle_hold` GÈLE l'intégrale sur une traversée courte — et cette formule, qui
+        # est celle de la DÉCHARGE, se met alors à la dépenser. Or son signe a un sens OPPOSÉ selon
+        # le régime où elle a été accumulée : en CHARGE, positif = « charge plus » (cf. le bloc
+        # « GEL DE L'INTÉGRALE SUR TRAVERSÉE D'IDLE (26/07) », qui documente ce piège). Une intégrale de
+        # 4080 héritée de CHARGE devenait donc 4080 W de DÉCHARGE commandés dès l'entrée en IDLE,
+        # que le slew montait par paliers de 500.
+        # MESURÉ 30/07→01/08 (54 h) : 12 emballements (`sp` +800 W en 10 s alors que |hl| < 300 W),
+        # dont **6 en IDLE venant de CHARGE** — les 6 plus gros, `sp` jusqu'à 2910 W, intégrales de
+        # 1044 à 4080. Le 01/08 à 14:19:30 : `regime=IDLE hl=45 amt=-61 int=4014 sp=2713`, SolarFlow
+        # et `up` déchargeant 2994 W en plein export, P1 à −2385 W (contrat = export INTERDIT).
+        # ⇒ `idle_hold` doit MÉMORISER l'intégrale (pour un retour au même régime), jamais la faire
+        # AGIR. On la neutralise donc ici, sans toucher au gel lui-même.
+        # ✅ NO-OP EXACT quand `idle_hold` = 0 (le défaut) : l'intégrale y vaut déjà 0 (l.985-986),
+        # donc aucune régression possible sur le comportement historique.
+        # ⚠️ Le jumeau `rem` (l.1265+) est dans la branche `elif regime == CHARGE`, inatteignable en
+        # IDLE : il n'y a rien à corriger là-bas. `_direct_control` a ses propres formules (l.1652,
+        # l.1680) et reste, lui, NON corrigé — cf. l'audit de cohérence ; il est inactif (`direct`=0).
         if self.regime in (ManagerState.DISCHARGE, ManagerState.IDLE):
-            demand = max(0.0, t_amt) + self.integral
+            integ = 0.0 if self.regime == ManagerState.IDLE else self.integral
+            demand = max(0.0, t_amt) + integ
             # 1) LES PRODUCTEURS D'ABORD — on leur demande CE DONT LA MAISON A BESOIN.
             #
             # ⚠️ On ne dimensionne PLUS sur `pv_ema`. `solarInput` ment : un device sans débouché
