@@ -60,6 +60,15 @@ CHG_REFUSE_MIN = 250.0
 # Un appareil qui progresse d'au moins ceci d'un cycle à l'autre est en RAMPE, pas en refus.
 RAMP_RISE = 25.0
 
+# Durée au-delà de laquelle une absorption NON COMMANDÉE cesse d'être un artefact de latence
+# et devient une charge réellement décidée par le firmware (cf. `_charge_subie`).
+# ⚠️ MESURÉ sur 59 h (trace du 03 au 06/08), c'est la SEULE grandeur qui sépare les deux cas :
+#   SolarFlow : 1237 épisodes, durée médiane 3 s, p90 8 s, **max 19 s**, aucun ≥ 60 s
+#               -> 100 % de latence (la sortie met 2-3 s à suivre une consigne qui vient de changer)
+#   up        : 114 épisodes de même allure, MAIS un de **494 s** — le vrai cas, celui du 06/08
+# 30 s laisse donc passer zéro artefact tout en attrapant l'épisode réel dès sa 30e seconde.
+SUBIE_MIN = 30.0
+
 # Marge de ré-exploration côté PRODUCTION. Volontairement bien plus petite que `chg_probe` :
 # offrir trop à un puits est gratuit (il refuse), demander trop à un producteur crée de l'import.
 # 40 W laissent la production remonter d'elle-même quand l'appareil refroidit, pour un biais
@@ -174,6 +183,8 @@ class FondationEngine:
         self.chg_refuse: dict[str, int] = {}     # cycles consécutifs de refus de charge
         self.prod_accept: dict[str, float] = {}  # production réellement LIVRÉE par device (plafond)
         self.prod_refuse: dict[str, int] = {}    # cycles consécutifs de sous-livraison
+        self.chg_subie: dict[str, float] = {}    # absorption NON commandée, confirmée (cf. SUBIE_MIN)
+        self.subie_since: dict[str, datetime] = {}  # depuis quand elle dure (écarte la latence)
         self.chg_prev: dict[str, float] = {}     # absorption du cycle précédent (détection de rampe)
         self.prod_prev: dict[str, float] = {}    # livraison du cycle précédent (détection de rampe)
         self.chg_wake: dict[str, datetime] = {}  # début de la LATENCE DE DÉMARRAGE en charge
@@ -298,6 +309,30 @@ class FondationEngine:
         if (acc := self.prod_accept.get(d.deviceId)) is None:
             return self._pmax(d)
         return min(self._pmax(d), acc + self.dis_probe.asNumber)
+
+    def _charge_subie(self, d: ZendureDevice) -> float:
+        """Absorption que l'appareil s'accorde SANS consigne — décision de son firmware, pas du moteur.
+
+        MESURÉE le 06/08 de 11:10:00 à 11:18:13 : `up` a absorbé **1200 W avec `Cmd` à 0**, à 10 %
+        de SoC (donc sous son `minSoc`), pendant que le moteur routait les 1200 W de solaire de
+        glagla vers le SolarFlow. Résultat : **105 Wh d'import en 8 minutes**, et 1004 W au compteur.
+
+        ⛔ Le moteur ne pouvait pas le voir : `house_load = P1 + Σ Home` compte cette absorption
+        comme de la consommation qu'on couvre. À 11:16:59 : `P1 = +1004`, `Σ Home = -1202`,
+        donc `hl = -198` — le moteur croyait avoir un SURPLUS de 155 W à absorber au moment précis
+        où il importait un kilowatt. L'intégrale, seule lucide, avait bien plongé, mais elle est
+        bornée par `-charge_base` et restait collée à -707.
+
+        ⭐ La bonne réponse n'est pas d'annuler le routage (l'import viendrait quand même de `up`,
+        gain nul : mesuré, il passerait de 1004 à 1002 W) mais d'ENVOYER LE SOLAIRE LÀ OÙ IL EST
+        DÉJÀ CONSOMMÉ. D'où le tri des puits par absorption subie décroissante (étape 1bis).
+
+        ⚠️ La valeur est calculée et CONFIRMÉE dans la boucle de mesure (cf. `SUBIE_MIN`) : une
+        absorption non commandée n'est retenue qu'après 30 s, sinon on prendrait pour une décision
+        du firmware ce qui n'est que la latence de l'appareil à suivre une consigne qui vient de
+        changer. Ici on ne fait que lire le résultat.
+        """
+        return self.chg_subie.get(d.deviceId, 0.0)
 
     def _chg_ceiling(self, d: ZendureDevice) -> float:
         """Plafond de charge basé sur l'ACCEPTATION MESURÉE, + une marge de ré-exploration.
@@ -803,6 +838,20 @@ class FondationEngine:
             absorbed = float(max(0, d.homeInput.asInt - d.homeOutput.asInt))
             rising = absorbed > self.chg_prev.get(d.deviceId, 0.0) + RAMP_RISE
             self.chg_prev[d.deviceId] = absorbed
+            # --- CHARGE SUBIE (1.4.3.47) : ce que l'appareil prend SANS qu'on le lui ait demandé ---
+            # Retenue seulement si elle PERSISTE : sur 59 h, toutes les excursions du SolarFlow
+            # tiennent en ≤ 19 s (sa sortie met 2-3 s à suivre une consigne qui change), alors que
+            # l'épisode réel de `up` a duré 494 s. Sans ce filtre, le tri des puits se déclencherait
+            # sur un artefact de latence 9,5 % du temps au lieu de 0,2 %.
+            sub = max(0.0, absorbed - asked)
+            if sub >= CHG_REFUSE_MIN:
+                self.subie_since.setdefault(d.deviceId, now)
+            else:
+                self.subie_since.pop(d.deviceId, None)
+            since = self.subie_since.get(d.deviceId)
+            self.chg_subie[d.deviceId] = (
+                sub if since is not None and (now - since).total_seconds() >= SUBIE_MIN else 0.0
+            )
             # ⚠️ UNE RAMPE MONTE, UN REFUS STAGNE. C'est le seul discriminant fiable.
             # Version précédente : `absorbed < asked - 100`, un seuil ABSOLU. Réglé sur des consignes
             # de 1000-2400 W, il devient absurde à 200 W : au petit matin un appareil en pleine
@@ -829,7 +878,15 @@ class FondationEngine:
                     self.chg_accept[d.deviceId] = min(self.chg_accept.get(d.deviceId, float("inf")), absorbed)
             else:
                 self.chg_refuse[d.deviceId] = 0
-                if asked > 50:
+                # ⚠️ 1.4.3.47 — une absorption RÉELLE prouve une capacité, qu'on l'ait demandée ou non.
+                # `asked > 50` seul rendait la mesure aveugle aux charges décidées par le firmware :
+                # le 06/08, `up` a absorbé 1200 W en continu avec `Cmd` à 0, et son `chg_accept` est
+                # resté figé à 503 (lu dans `acc=` de la trace). Son plafond de charge restait donc
+                # calibré sur une valeur périmée, ce qui le maintenait en queue de tout partage —
+                # 27 Wh de charge commandée sur 59 h, contre 12 619 Wh pour le SolarFlow.
+                # Seuil `CHG_REFUSE_MIN` (250 W) : on ne retient pas le bruit, seulement une
+                # absorption franche. Le sens de `chg_accept` est inchangé (ce que l'appareil PREND).
+                if asked > 50 or absorbed >= CHG_REFUSE_MIN:
                     self.chg_accept[d.deviceId] = max(self.chg_accept.get(d.deviceId, 0.0), absorbed)
 
         cmd: dict[ZendureDevice, float] = dict.fromkeys(devices, 0.0)
@@ -1353,6 +1410,14 @@ class FondationEngine:
             # au lieu de les laisser l'encaisser (même seuil/hystérésis qu'en décharge). Si le bus a déjà
             # saturé les batteries (rem > 0), il ne reste pas de place -> pas de routage, repli naturel.
             sinks = [d for d in cand if not self._has_pv(d) and d.electricLevel.asInt < 100]
+            # ⚠️ 1.4.3.47 — SERVIR D'ABORD CELUI QUI ABSORBE DÉJÀ SANS CONSIGNE.
+            # Le solaire routé doit aller là où il est DÉJÀ consommé, sinon on fabrique de l'import :
+            # le 06/08 11:10-11:18, `up` prenait 1200 W au réseau de sa propre initiative pendant que
+            # ce routage envoyait les 1200 W de glagla au SolarFlow — 105 Wh d'import en 8 minutes.
+            # Router vers `up` équilibre exactement ; router ailleurs ajoute une charge à une charge.
+            # Tri STABLE : quand personne n'absorbe spontanément (le cas ordinaire), toutes les clés
+            # valent 0 et l'ordre choisi par `charge_strategy` est conservé intact — no-op exact.
+            sinks.sort(key=lambda d: -self._charge_subie(d))
             room_left = sum(chg_cap(d) for d in sinks)
             if room_left <= 0:
                 self.surplus_active = False
