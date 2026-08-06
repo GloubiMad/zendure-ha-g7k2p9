@@ -60,13 +60,21 @@ CHG_REFUSE_MIN = 250.0
 # Un appareil qui progresse d'au moins ceci d'un cycle à l'autre est en RAMPE, pas en refus.
 RAMP_RISE = 25.0
 
-# Durée au-delà de laquelle une absorption NON COMMANDÉE cesse d'être un artefact de latence
+# Durée au-delà de laquelle une absorption NON COMMANDÉE cesse d'être un artefact de MESURE
 # et devient une charge réellement décidée par le firmware (cf. `_charge_subie`).
-# ⚠️ MESURÉ sur 59 h (trace du 03 au 06/08), c'est la SEULE grandeur qui sépare les deux cas :
-#   SolarFlow : 1237 épisodes, durée médiane 3 s, p90 8 s, **max 19 s**, aucun ≥ 60 s
-#               -> 100 % de latence (la sortie met 2-3 s à suivre une consigne qui vient de changer)
-#   up        : 114 épisodes de même allure, MAIS un de **494 s** — le vrai cas, celui du 06/08
-# 30 s laisse donc passer zéro artefact tout en attrapant l'épisode réel dès sa 30e seconde.
+#
+# ⛔⛔ CE N'EST PAS UNE LATENCE D'APPAREIL. Les Zendure réagissent en moins d'une seconde ; toute
+# « lenteur » lue dans une trace vient de la CHAÎNE DE MESURE, jamais du matériel. Ici l'écart
+# `Home − Cmd` compare deux grandeurs qui ne datent pas du même instant : `Cmd` est écrite par le
+# moteur à l'instant du calcul, tandis que `Home` est la DERNIÈRE VALEUR RAPPORTÉE par l'appareil.
+# MESURÉ sur la trace du 03 au 06/08 — les deux distributions sont les mêmes, ce qui le prouve :
+#   `Home` du SolarFlow change toutes les 3 s en médiane, p90 6 s   (télémétrie)
+#   les « écarts » qu'on mesurait : 3 s en médiane, p90 8 s, max 19 s
+# Autrement dit on lisait la période de rafraîchissement, pas une réaction.
+#
+# La vraie charge subie, elle, se distingue par sa DURÉE : l'épisode de `up` du 06/08 a duré
+# **494 s** avec `Cmd` à 0. 30 s écarte donc 100 % du bruit de mesure (max observé 19 s) tout en
+# attrapant l'épisode réel dès sa 30e seconde.
 SUBIE_MIN = 30.0
 
 # Marge de ré-exploration côté PRODUCTION. Volontairement bien plus petite que `chg_probe` :
@@ -329,8 +337,10 @@ class FondationEngine:
 
         ⚠️ La valeur est calculée et CONFIRMÉE dans la boucle de mesure (cf. `SUBIE_MIN`) : une
         absorption non commandée n'est retenue qu'après 30 s, sinon on prendrait pour une décision
-        du firmware ce qui n'est que la latence de l'appareil à suivre une consigne qui vient de
-        changer. Ici on ne fait que lire le résultat.
+        du firmware le simple décalage entre une consigne fraîche et une télémétrie rafraîchie
+        toutes les 3 s. ⛔ Ce décalage n'est PAS une lenteur des appareils — ils répondent en moins
+        d'une seconde ; c'est la chaîne de mesure qui ne peut pas le montrer. Ici on ne fait que
+        lire le résultat.
         """
         return self.chg_subie.get(d.deviceId, 0.0)
 
@@ -839,10 +849,12 @@ class FondationEngine:
             rising = absorbed > self.chg_prev.get(d.deviceId, 0.0) + RAMP_RISE
             self.chg_prev[d.deviceId] = absorbed
             # --- CHARGE SUBIE (1.4.3.47) : ce que l'appareil prend SANS qu'on le lui ait demandé ---
-            # Retenue seulement si elle PERSISTE : sur 59 h, toutes les excursions du SolarFlow
-            # tiennent en ≤ 19 s (sa sortie met 2-3 s à suivre une consigne qui change), alors que
-            # l'épisode réel de `up` a duré 494 s. Sans ce filtre, le tri des puits se déclencherait
-            # sur un artefact de latence 9,5 % du temps au lieu de 0,2 %.
+            # Retenue seulement si elle PERSISTE. `Home` (rapporté, rafraîchi toutes les 3 s) et
+            # `asked` (écrit à l'instant du calcul) ne datent pas du même moment : leur écart passe
+            # brièvement à quelques centaines de watts à chaque changement de consigne, sans que
+            # l'appareil ait quoi que ce soit à se reprocher. Mesuré : ces écarts tiennent tous en
+            # ≤ 19 s, contre 494 s pour l'épisode réel de `up`. Sans ce filtre, le tri des puits
+            # partirait 9,5 % du temps sur du bruit de mesure au lieu de 0,2 %.
             sub = max(0.0, absorbed - asked)
             if sub >= CHG_REFUSE_MIN:
                 self.subie_since.setdefault(d.deviceId, now)
