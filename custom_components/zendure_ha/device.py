@@ -817,14 +817,37 @@ class ZendureZenSdk(ZendureDevice):
 
     async def dataRefresh(self, update_count: int) -> None:
         if update_count == 0 and not self.online:
-            json = await self.httpGet("properties/report")
-            await self.mqttProperties(json)
+            # cf. `power_get` : un dict vide est une EXCEPTION attrapée, pas une réponse.
+            if json := await self.httpGet("properties/report"):
+                await self.mqttProperties(json)
 
     async def power_get(self) -> bool:
-        """Get the current power."""
+        """Get the current power.
+
+        ⛔ 1.4.3.49 — UN ÉCHEC HTTP N'EST PAS UNE RÉPONSE. `httpGet` renvoie `{}` quand la requête
+        a levé, et pose `lastseen = datetime.min` pour le signaler. Or `mqttProperties` commence par
+        remettre `lastseen`/`lastreport` à `now + 5 min` AVANT tout contrôle du contenu : appelée
+        avec `{}`, elle EFFAÇAIT ce signal d'échec, puis ne mettait à jour aucune entité faute de
+        données. L'appareil était donc déclaré frais (`Age` = 0) avec des valeurs GELÉES à leur
+        dernier état connu, et le moteur calculait dessus.
+
+        MESURÉ le 08/08 de 12:57:31 à 15:17 (2 h 20) : le SolarFlow rapportait `Home = -1863 W`
+        figé au watt près, `Age` entre 0 et 3 s — pendant que la **pince B mesurait 75 W**, donc
+        aucune absorption. Interrogé directement sur son IP, l'appareil répondait normalement.
+        `house_load = P1 + Σ Home` était donc faux de 1863 W : le moteur croyait avoir placé cette
+        puissance et laissait filer le reste. **2,19 kWh d'export en 2 h, zéro import.** Le blocage
+        s'est levé au redémarrage de l'intégration, ce qui confirme qu'il venait d'ici.
+
+        ⚠️ Le test est mis chez l'APPELANT HTTP, pas dans `mqttProperties` : celle-ci sert aussi le
+        chemin MQTT, où recevoir un message — même pauvre — prouve que la liaison vit et justifie
+        de rafraîchir `lastseen`. Les deux cas n'ont pas le même sens, on ne les traite pas au même
+        endroit. Sans réponse, l'appareil retombe sur la détection normale (`setStatus` →
+        `connectionStatus` 0 → OFFLINE → retiré de la liste par `fondation.py`), et le moteur cesse
+        de compter une valeur morte au lieu de bâtir sa régulation dessus.
+        """
         if self.connection.value != 0:
-            json = await self.httpGet("properties/report")
-            await self.mqttProperties(json)
+            if json := await self.httpGet("properties/report"):
+                await self.mqttProperties(json)
 
         return await super().power_get()
 
