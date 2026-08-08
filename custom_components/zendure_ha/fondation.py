@@ -23,7 +23,7 @@ et doit d'abord servir à caractériser le phénomène.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from time import perf_counter
 
 from homeassistant.components.number import NumberMode
@@ -59,6 +59,23 @@ CHG_REFUSE_MIN = 250.0
 
 # Un appareil qui progresse d'au moins ceci d'un cycle à l'autre est en RAMPE, pas en refus.
 RAMP_RISE = 25.0
+
+# Durée de validité du plafond de charge mesuré (`_chg_ceiling`), à partir du dernier REFUS confirmé.
+#
+# ⛔ LE CLIQUET CORRIGÉ EN 1.4.3.48. `chg_accept` est le MAXIMUM OBSERVÉ ; s'en servir en permanence
+# comme PLAFOND revient à décréter qu'un appareil ne peut pas faire mieux que ce qu'on a bien voulu
+# lui demander. Terrain du 08/08 : `load_max` avait bridé le SolarFlow à 2040 W pendant des jours,
+# `chg_accept` a donc appris 2041, et le plafond s'est figé à `2041 + chg_probe` = **2191 W**.
+# Remettre `load_max` à 100 n'a RIEN changé : pour apprendre qu'il peut aller à 2400, il aurait
+# fallu le lui demander, et le moteur se l'interdisait. Le moteur avait mémorisé sa propre bride
+# comme si c'était une limite du matériel.
+#
+# ⭐ Le tapering, lui, est CONTINU : un appareil qui refuse le refuse encore trois secondes plus
+# tard, et la détection de refus (`CHG_REFUSE_N` cycles) le rattrape immédiatement. Un plafond qui
+# survit dix minutes à son dernier refus ne perd donc aucune protection — il cesse simplement de
+# s'appliquer quand plus rien ne le justifie. Mesuré : 75 refus confirmés sur le SolarFlow en 8
+# jours, soit ~6 % du temps sous plafond au lieu de 100 %.
+CHG_CAP_TTL = 600.0
 
 # Durée au-delà de laquelle une absorption NON COMMANDÉE cesse d'être un artefact de MESURE
 # et devient une charge réellement décidée par le firmware (cf. `_charge_subie`).
@@ -191,6 +208,7 @@ class FondationEngine:
         self.chg_refuse: dict[str, int] = {}     # cycles consécutifs de refus de charge
         self.prod_accept: dict[str, float] = {}  # production réellement LIVRÉE par device (plafond)
         self.prod_refuse: dict[str, int] = {}    # cycles consécutifs de sous-livraison
+        self.chg_cap_until: dict[str, datetime] = {}  # jusqu'à quand le plafond mesuré vaut (CHG_CAP_TTL)
         self.chg_subie: dict[str, float] = {}    # absorption NON commandée, confirmée (cf. SUBIE_MIN)
         self.subie_since: dict[str, datetime] = {}  # depuis quand elle dure (écarte la latence)
         self.chg_prev: dict[str, float] = {}     # absorption du cycle précédent (détection de rampe)
@@ -356,9 +374,19 @@ class FondationEngine:
         on ne découvre jamais qu'il peut reprendre. D'où la marge `chg_probe` : on offre toujours un
         peu plus que le mesuré. S'il peut, il absorbe plus, l'EMA monte, le plafond suit — remontée
         continue, sans le bang-bang qu'un seuil binaire fabriquerait (cf. 1.4.3.11).
+
+        ⛔ 1.4.3.48 — LE PLAFOND NE VAUT QUE TANT QUE LE REFUS EST D'ACTUALITÉ (cf. `CHG_CAP_TTL`).
+        Sans cette péremption, `chg_accept` — qui n'est que le MAXIMUM OBSERVÉ — devient un plafond
+        définitif : le moteur décrète que l'appareil ne peut pas faire mieux que ce qu'on a bien
+        voulu lui demander. Le 08/08, `load_max` avait bridé le SolarFlow à 2040 W pendant des
+        jours ; `chg_accept` a appris 2041 et le plafond s'est figé à 2191 W. Remettre `load_max`
+        à 100 n'a rien changé — le cliquet, lui, était resté fermé.
         """
         if (acc := self.chg_accept.get(d.deviceId)) is None:
             return self._pmax(d, charge=True)
+        until = self.chg_cap_until.get(d.deviceId)
+        if until is None or datetime.now() >= until:
+            return self._pmax(d, charge=True)   # aucun refus récent : rien ne justifie de brider
         return min(self._pmax(d, charge=True), acc + self.chg_probe.asNumber)
 
     def _bypass_blocks(self, d: ZendureDevice) -> bool:
@@ -888,6 +916,8 @@ class FondationEngine:
                 self.chg_refuse[d.deviceId] = n
                 if n >= CHG_REFUSE_N:
                     self.chg_accept[d.deviceId] = min(self.chg_accept.get(d.deviceId, float("inf")), absorbed)
+                    # Le plafond n'est légitime QUE tant que le refus est d'actualité (cf. CHG_CAP_TTL).
+                    self.chg_cap_until[d.deviceId] = now + timedelta(seconds=CHG_CAP_TTL)
             else:
                 self.chg_refuse[d.deviceId] = 0
                 # ⚠️ 1.4.3.47 — une absorption RÉELLE prouve une capacité, qu'on l'ait demandée ou non.
