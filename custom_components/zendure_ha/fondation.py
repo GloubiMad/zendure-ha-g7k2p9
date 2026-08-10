@@ -1053,6 +1053,33 @@ class FondationEngine:
         # produit la nuit du 27/07 (intégrale à 4800 de 00 h à 08 h) : borner à l'entrée ne suffit
         # pas, il faut borner l'ÉTAT. Uniquement par le HAUT : le plancher reste `int_neg` (B).
         self.integral = min(self.integral, imax)
+        # ⛔ 1.4.3.50 — ET PAR LE BAS, POUR LA MÊME RAISON. L'anti-inversion `-dis_base` /
+        # `-charge_base` n'existait QUE dans les branches de vidange, donc uniquement TANT QUE
+        # l'écart P1 persiste. Or c'est après, quand la demande s'effondre, que la borne devient
+        # nécessaire : l'intégrale garde la valeur atteinte face à l'ancienne demande, et se
+        # retrouve plus grande que la nouvelle. `demand = max(0, t_amt) + integral` passe alors
+        # NÉGATIF et la consigne s'inverse — le moteur charge en régime DISCHARGE, ce que le
+        # commentaire de la branche export dit pourtant vouloir interdire (« jamais d'inversion
+        # via l'intégrale ; c'est le RÉGIME qui décide »). Même défaut de forme que l'écrêtage
+        # par le haut corrigé en `.36`/`.37` : borner à l'entrée ne suffit pas, il faut borner l'ÉTAT.
+        #
+        # MESURÉ le 08/08 à 23:28:57, arrêt du cumulus (pince A : 2254 W → 5 W) :
+        #   23:28:59  hl 3030 → 276, l'intégrale plonge à -1200 (plancher `int_neg`) — légitime,
+        #             `t_amt` valait encore 3030 et la borne -3030 ne mordait pas
+        #   23:29:05  P1 revient à -11, équilibre atteint
+        #   23:29:15  `amt` = 588 mais l'intégrale est restée à -1200 → sp = -611 → le moteur CHARGE
+        #   23:29:17  P1 = +1061, et ~30 s d'import le temps que l'intégrale remonte à +120/cycle
+        # Sur 811 653 cycles (5 traces, 30/07→09/08) : 800 cycles en DISCHARGE et 2010 en CHARGE
+        # au-delà de la borne (0,35 % du temps), dépassement médian 54 et 114 W, pointes à 795 W,
+        # 177 Wh d'import cumulé. Peu d'énergie, mais une inversion de consigne injustifiable.
+        #
+        # ⚠️ Le signe de la borne DÉPEND DU RÉGIME : en DISCHARGE l'intégrale positive veut dire
+        # « décharge plus », en CHARGE « charge plus ». Pas de borne en IDLE : l'intégrale y est
+        # gelée pour un éventuel retour au même régime (cf. `idle_hold`) et n'agit plus (`.46`).
+        if self.regime == ManagerState.DISCHARGE:
+            self.integral = max(self.integral, -max(0.0, t_amt))
+        elif self.regime == ManagerState.CHARGE:
+            self.integral = max(self.integral, -max(0.0, -t_amt))
         # --- GEL DE L'INTÉGRALE SUR TRAVERSÉE D'IDLE (26/07) ---
         # IDLE n'est pas un état de repos : la machine à états ci-dessus interdit CHARGE↔DISCHARGE en
         # direct, donc TOUTE inversion y transite. Remettre l'intégrale à 0 à chaque passage effaçait
