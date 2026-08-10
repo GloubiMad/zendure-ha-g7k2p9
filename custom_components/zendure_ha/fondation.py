@@ -26,6 +26,7 @@ import logging
 from datetime import datetime, timedelta
 from time import perf_counter
 
+from homeassistant.components import persistent_notification
 from homeassistant.components.number import NumberMode
 from homeassistant.helpers.restore_state import RestoreEntity
 
@@ -682,17 +683,45 @@ class FondationEngine:
         ⚠️ On lève le plafond ARBITRAIRE, jamais la protection thermique : si le device dérate en
         chauffant il livrera moins que commandé, P1 le verra et l'intégrale basculera sur `up`.
         """
-        target = int(self.sf_dismax.asNumber)
-        if target <= 0:
-            _LOGGER.warning("SolarFlow unlock ignoré : régler d'abord « SolarFlow décharge max » (0 = off)")
-            return
+        # ⛔ 1.4.3.51 — CE BOUTON ÉTAIT SILENCIEUSEMENT INOPÉRANT.
+        # Il commençait par `if int(self.sf_dismax.asNumber) <= 0: return`. Or `sf_dismax` vaut 0
+        # par défaut — et il valait 0 sans exception du 25/07 au 10/08 sur toutes les traces. Le
+        # bouton sortait donc à sa deuxième ligne, SANS envoyer la moindre requête, et sans autre
+        # trace qu'un `_LOGGER.warning` que rien n'affiche. Vu de l'UI : un bouton qui ne fait rien.
+        # Ni timeout, ni refus de l'appareil : AUCUNE tentative (l'écriture flash prend 87 ms
+        # mesurés, très loin du délai d'1 s — j'ai failli accuser le timeout à tort).
+        #
+        # La garde n'était pas absurde : le déblocage a deux moitiés, l'écriture dans l'appareil et
+        # la vue interne du moteur. Mais elle protégeait contre un désaccord IMPOSSIBLE : `device.py`
+        # écoute déjà `inverseMaxPower` et rappelle `setLimits`, donc dès que l'appareil confirme
+        # 2400 la vue interne suit toute seule. `sf_dismax` reste utile pour forcer une autre valeur,
+        # il ne doit pas être un prérequis.
+        #
+        # ⭐ REPLI SUR LA PLAQUE DU MODÈLE. À défaut de réglage, on écrit `discharge_nominal` —
+        # la valeur du constructeur du device, mémorisée AVANT tout écrasement par le cloud
+        # (cf. `setLimits`). Lire `discharge_limit` à la place renverrait 800, la valeur du bridage.
+        reglage = int(self.sf_dismax.asNumber)
         for d in self.manager.devices:
             if not isinstance(d, ZendureZenSdk):
+                continue
+            target = reglage if reglage > 0 else int(getattr(d, "discharge_nominal", 0))
+            if target <= 0:
+                _LOGGER.warning("SolarFlow unlock %s : aucune cible (ni sf_dismax, ni plaque)", d.name)
                 continue
             imp = d.entities.get("inverseMaxPower")
             current = getattr(imp, "asInt", None) if imp is not None else None
             _LOGGER.warning("SolarFlow unlock %s : inverseMaxPower %s -> %s (écriture FLASH unique)", d.name, current, target)
             await d.doCommand({"properties": {"inverseMaxPower": target}})
+            # Le bouton doit DIRE ce qu'il a fait : un warning dans les logs ne se voit pas.
+            persistent_notification.async_create(
+                self.hass,
+                f"**{d.name}** — `inverseMaxPower` {current} → **{target} W** "
+                f"({'demandé' if reglage > 0 else 'plaque du modèle'}, écriture flash unique).\n\n"
+                f"Vérifier dans une minute que la valeur **tient** : si elle retombe, le cloud la "
+                f"réécrit et il faut d'abord désactiver HEMS dans l'application Zendure.",
+                "Zendure — déblocage SolarFlow",
+                f"zendure_unlock_{d.deviceId}",
+            )
 
     def createDeviceEntities(self) -> None:
         """Capteur de consigne + case « panneaux raccordés », par onduleur. À appeler APRÈS le

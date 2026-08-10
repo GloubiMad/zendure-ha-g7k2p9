@@ -217,8 +217,21 @@ class ZendureDevice(EntityDevice):
         self.aggrSwitchCount = ZendureRestoreSensor(self, "switchCount", None, None, None, "total_increasing", 0)
 
     def setLimits(self, charge: int, discharge: int) -> None:
-        """Set the device limits."""
+        """Set the device limits.
+
+        ⭐ `discharge_nominal` = la PLAQUE DU MODÈLE, mémorisée au tout PREMIER appel — celui du
+        constructeur du device (`SolarFlow2400Pro` : `setLimits(-3200, 2400)`). Tous les appels
+        suivants viennent de l'APPAREIL (`inverseMaxPower`, `chargeMaxLimit`), donc du cloud, et
+        écrasent `discharge_limit` : le SolarFlow rapporte `inverseMaxPower = 800` et la limite
+        tombe de 2400 à 800 en quelques secondes.
+        ⛔ Sans cette copie, le bouton de déblocage n'aurait aucune référence : lire
+        `discharge_limit` au moment du clic renverrait **800**, c'est-à-dire la valeur du bridage
+        qu'on cherche justement à lever. C'est le même piège que le cliquet de `chg_accept`
+        (cf. `.48`) — prendre pour une limite du matériel une limite qu'on lui a imposée.
+        """
         try:
+            if getattr(self, "discharge_nominal", 0) <= 0:
+                self.discharge_nominal = discharge
             self.charge_limit = charge
             self.charge_optimal = charge // 4
             self.charge_start = charge // 10
