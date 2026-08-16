@@ -225,6 +225,7 @@ class FondationEngine:
         self.idle_since: datetime | None = None      # instant d'entrée en IDLE (gel de l'intégrale)
         self.idle_regime: ManagerState | None = None  # régime AVANT l'entrée en IDLE (anti-contamination)
         self.dir_prev: dict[str, float] = {}   # dernière consigne appliquée (dwell d'inversion)
+        self.out_capped: float = 0.0  # 1.4.3.52 : W retires par le plafond de sortie au dernier cycle
         self.dir_since: dict[str, datetime | None] = {}  # instant du 1er cycle d'inversion demandée (dwell en SECONDES)
         self.cmd_applied: dict[str, int] = {}  # dernière consigne RÉELLEMENT appliquée (slew-rate)
         # Consigne envoyée au device (signée : + décharge / − charge). Lue par simulation.csv et par
@@ -616,6 +617,40 @@ class FondationEngine:
         # de 15 % d'un coup. La levée est donc CONTINUE (cf. `occ` dans `update`) : l'occupation vaut
         # le plafond, OU ce que la maison réclame si c'est plus. Monotone, sans discontinuité.
         self.load_max = FondationNumber(m, "fondation_load_max", 100, 50, 100, "%")
+        # ⛔ 1.4.3.52 — PLAFOND DE SORTIE : l'export au-delà du contrat est INTERDIT.
+        #
+        # La pointe d'export n'est PAS réductible par une réaction, quelle qu'elle soit. Mesuré le
+        # 14/08 à 19:06:49 (charge VE de ~3300 W qui s'arrête) :
+        #   19:06:48  P1   -68 W   sortie 4035 W  consigne 3884   <- rien d'anormal
+        #   19:06:49  P1 -3350 W   sortie 4035 W  consigne 3884   <- POINTE, 1er échantillon
+        #   19:06:51                              consigne 1773   <- le moteur a déjà réagi (2 s)
+        #   19:06:54  P1  -135 W                                  <- fini
+        # La pointe est atteinte AVANT que la boucle ait pu voir quoi que ce soit. Un « kill switch »
+        # sur P1 < seuil ne peut donc pas l'empêcher : pour se déclencher, il faut que les 3350 W
+        # soient déjà passés. Il ne raccourcirait qu'une durée qui vaut déjà 3 s, et couper à zéro
+        # fabrique l'import qui suit (11/08 : 7 s à 940 W après une coupure sèche).
+        #
+        # ⇒ On ne réagit pas, on PLAFONNE EN AMONT. La pointe d'export vaut ce que le parc SORTAIT
+        # à l'instant du lâcher (vérifié sur 9 épisodes : 4035 -> 3350, 3512 -> 2752, 3070 -> 2268),
+        # donc borner la sortie borne l'export — sans latence, sans détection, sans cas particulier.
+        #
+        # REJEU sur les 47 épisodes d'export >= 1500 W de 6 jours de trace :
+        #   sans plafond  : pire pointe 3350 W
+        #   à 2800        : pire pointe 2214 W   (le 14/08 tombe à 2115 W)
+        #   à 2400        : pire pointe 2133 W   -> +264 Wh/j pour 81 W de mieux : non
+        #
+        # COÛT : 36,5 min/jour bridées, manque médian 469 W, exclusivement entre 19 h et 23 h
+        # (0 Wh entre 10 h et 18 h). Mais l'énergie n'est pas PERDUE, elle est DÉCALÉE : les trois
+        # batteries touchent leur plancher de 15 % toutes les nuits, et l'import qui suit la mise à
+        # plat (1172 à 27946 Wh) dépasse de loin ce que le plafond retient (200 à 460 Wh) — les Wh
+        # retenus sont donc rendus avant la fin de la nuit. Import total inchangé.
+        #
+        # ⚠️ CE PLAFOND EST DUR : si la maison demande 3300 W, le parc en sort 2800 et le reste est
+        # acheté. C'est le prix de la garantie, et il n'y a pas de version « intelligente » : sortir
+        # 3300 W, c'est accepter un risque d'export de 3300 W.
+        # 0 = désactivé (no-op exact). Défaut 2800 : la valeur demandée, appliquée même si la
+        # restauration échouait (cf. la course de construction documentée dans `FondationNumber`).
+        self.out_max = FondationNumber(m, "fondation_out_max", 2800, 0, 5000, "W")
         # Bouton de DÉBLOCAGE : écrit `inverseMaxPower = sf_dismax` UNE fois sur le/les SolarFlow.
         # Bouton (et non automatisme) parce que cette propriété part en FLASH : elle doit être écrite
         # rarement et volontairement. Cf. `unlock_solarflow` pour la procédure complète.
@@ -844,6 +879,20 @@ class FondationEngine:
         # `_pmax` (et non `discharge_limit`) : le plafond d'occupation doit valoir ici AUSSI, sinon
         # l'intégrale se charge contre une puissance qu'on ne commandera pas — cf. `_pmax`.
         imax = sum(self._pmax(d) for d in devices if d.state != DeviceState.SOCEMPTY)
+        # ⛔ 1.4.3.52 — le plafond de sortie entre AUSSI ici, et ce n'est pas un raffinement.
+        # `imax` a trois rôles (anti-windup `sat_dis`, plafond de l'intégrale, plafond de la
+        # descente) et le commentaire ci-dessous le dit : « l'intégrale ne doit jamais dépasser ce
+        # qu'on peut réellement commander ». Avec `out_max`, ce qu'on peut commander devient
+        # `out_max`. Sans cette ligne, l'intégrale monterait jusqu'à 4800 pendant que le plafond
+        # mord (P1 reste positif = import), et au lâcher de la charge elle maintiendrait la demande
+        # AU PLAFOND pendant plusieurs secondes : on aurait remplacé une pointe de 3 s par un
+        # plateau de 2800 W qui dure. Poser le plafond sans corriger `imax` serait donc une
+        # régression, pas une demi-mesure.
+        # Bonus : `imax` part déjà en paramètre dans `_direct_control` (cf. l'appel plus bas), donc
+        # le second moteur hérite de la correction — c'est précisément l'erreur classique de ce
+        # fichier (une décision écrite à deux endroits, corrigée à un seul) que ça évite ici.
+        if (omax := self.out_max.asNumber) > 0:
+            imax = min(imax, omax)
 
         # --- pv-EMA par device (lisse le PV utilisé partout, sans lisser le total) ---
         palpha = max(0.05, min(1.0, self.pv_alpha.asNumber / 100.0))
@@ -1613,6 +1662,42 @@ class FondationEngine:
             lo = prev - slew_dn if slew_dn > 0 else float("-inf")  # plancher de DESCENTE (0 = illimité)
             cmd[d] = max(lo, min(hi, cmd[d]))
 
+        # --- PLAFOND DE SORTIE (1.4.3.52) — dernier rempart avant l'envoi ---------------------
+        # ICI et nulle part ailleurs : `_apply_and_report` est le SEUL point de passage des DEUX
+        # moteurs (`update` et `_direct_control` y arrivent tous les deux). Le plafonner en amont,
+        # dans le calcul de `demand`, ne couvrirait que le moteur principal — c'est exactement la
+        # forme qu'ont pris tous les bugs graves de ce fichier.
+        #
+        # APRÈS le slew, volontairement : la valeur plafonnée est celle qui part dans `cmd_applied`,
+        # donc le cycle suivant rampe depuis le plafond et non depuis une consigne jamais appliquée.
+        #
+        # SOMME ALGÉBRIQUE, pas somme des positifs : si un producteur sort 1200 W pendant qu'un puits
+        # en absorbe 1200, le net entrant dans la maison est nul — il n'y a rien à brider. Seul le
+        # net peut devenir de l'export.
+        #
+        # AU PRORATA des seules consignes de décharge : ça préserve la répartition décidée en amont
+        # (cascade, usure, priorité aux producteurs) au lieu de sacrifier un appareil. On ne touche
+        # jamais aux consignes de charge — `out_max` n'empêche pas d'absorber du surplus.
+        #
+        # PRORATA SIMPLE, et pas « batterie d'abord, PV en dernier » : brider un producteur lui fait
+        # écrêter ses propres panneaux (perte sèche), alors que brider une batterie ne perd rien.
+        # La priorité serait donc plus juste EN THÉORIE — sauf qu'elle ne servirait jamais : quand
+        # le plafond mord, le solaire est déjà éteint. Mesuré sur 6 jours, solaire moyen des Zendure
+        # selon la décharge : 2500-3000 W -> 22 W ; 3000-3500 W -> 10 W ; > 3500 W -> 14 W. Et le
+        # bridage se produit exclusivement entre 19 h et 23 h (0 Wh entre 10 h et 18 h). Ajouter un
+        # ordre de priorité serait de la complexité sans effet mesurable.
+        if (omax := self.out_max.asNumber) > 0 and (total := sum(cmd.values())) > omax:
+            exces = total - omax
+            pos = {d: c for d, c in cmd.items() if c > 0}
+            if (somme := sum(pos.values())) > 0:
+                for d, c in pos.items():
+                    cmd[d] = c - exces * c / somme
+                self.out_capped = exces  # tracé dans le message, pour pouvoir le mesurer ensuite
+            else:
+                self.out_capped = 0.0
+        else:
+            self.out_capped = 0.0
+
         # --- application (gardes reprises du moteur 1.4.2 : bypass non stoppé, offgrid maintenu) ---
         setpoint = 0
         for d in devices:
@@ -1668,6 +1753,9 @@ class FondationEngine:
             # appareil PLEIN sans avoir à recouper les colonnes (le champ debug a un cycle de retard
             # sur elles, ce qui rend tout recoupement fragile).
             f" st={'/'.join(f'{self._tag(i, d)}:{d.state.name[:5]}{int(cmd.get(d, 0)):+d}' for i, d in enumerate(devices))}"
+            # `cap` n'apparaît QUE si le plafond a mordu : 480 000 lignes/jour, on n'ajoute pas
+            # un champ constamment vide. Sa présence date et chiffre chaque bridage.
+            f"{f' cap={int(self.out_capped)}' if self.out_capped > 0 else ''}"
             f" strat={self.discharge_strategy.value}/{self.charge_strategy.value}{ms}"
             f"{self._params()}"
         )
@@ -1701,6 +1789,7 @@ class FondationEngine:
             f" dpr{self.dis_probe.asNumber} imin{self.int_min.asNumber} wkg{self.wake_grace.asNumber}"
             f" dir{self.direct.asNumber} engc{self.min_engage_chg.asNumber}"
             f" lmx{self.load_max.asNumber}"
+            f" omx{self.out_max.asNumber}"
             f" tf{self.timefast.asNumber}/{self.timezero.asNumber}"
             f" load{FondationEngine.loads}/{id(self) & 0xFFFF:04x}"
         )
@@ -1729,7 +1818,7 @@ class FondationEngine:
             ("sur_off", self.surplus_off), ("dwell", self.dwell_sec),
             ("sf_dismax", self.sf_dismax), ("idle_hold", self.idle_hold), ("dis_probe", self.dis_probe),
             ("int_min", self.int_min), ("wake_grace", self.wake_grace), ("direct", self.direct),
-            ("eng_chg", self.min_engage_chg), ("load_max", self.load_max),
+            ("eng_chg", self.min_engage_chg), ("load_max", self.load_max), ("out_max", self.out_max),
             ("timefast", self.timefast), ("timezero", self.timezero),
         ]
 
