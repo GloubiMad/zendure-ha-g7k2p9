@@ -60,6 +60,9 @@ CONST_HEADER = {"content-type": "application/json; charset=UTF-8"}
 # ce qui fait passer le champ `Age` du CSV à −1 (« jamais vu »). Ce −1 est donc la CONSÉQUENCE du
 # délai dépassé, jamais la preuve que l'appareil a décroché.
 CONST_TIMEOUT = ClientTimeout(total=1)
+# Échecs consécutifs avant d'essayer l'autre adresse (cf. `_http_ko`). 3 = ~3 s de détection,
+# assez pour ne pas basculer sur un incident réseau passager, assez peu pour ne rien coûter.
+HTTP_FAILS_SWAP = 3
 SF_COMMAND_CHAR = "0000c304-0000-1000-8000-00805f9b34fb"
 
 
@@ -140,6 +143,29 @@ class ZendureDevice(EntityDevice):
         self.mqtt: mqtt_client.Client | None = None
         self.zendure: mqtt_client.Client | None = None
         self.ipAddress = definition.get("ip", "") if definition.get("ip", "") != "" else f"zendure-{definition['productModel'].replace(' ', '')}-{self.snNumber}.local"
+        # ⛔ 1.4.3.53 — L'ADRESSE PEUT CHANGER, ET RIEN NE LE REMARQUAIT.
+        # `ip` vient de l'API cloud et n'est relue qu'au chargement de l'intégration. Le 17/08/2026
+        # le SolarFlow s'est reconnecté au WiFi avec une nouvelle adresse (.221 -> .230) : le cloud
+        # a continué d'annoncer l'ancienne, et TOUT s'est arrêté pendant 25 heures.
+        #   - chaque `httpGet` partait dans le vide -> `lastseen = datetime.min` -> OFFLINE
+        #     -> `fondation.py` retirait l'appareil de sa liste : 28 % de batterie inutilisables ;
+        #   - pire, ces appels sont AWAIT dans le cycle COMMUN (cf. le bloc CONST_TIMEOUT) : le
+        #     cycle est passé de 22-68 ms à 1002 ms, soit 60 cycles/minute au lieu de 882 à 2727.
+        #     Comme `slew` et `step` sont PAR CYCLE, c'est toute la dynamique de régulation des
+        #     DEUX Hyper — parfaitement joignables, eux — qui s'est effondrée.
+        # Le nom mDNS était déjà construit ici, mais seulement comme DÉFAUT quand le cloud ne donne
+        # aucune IP : jamais comme SECOURS. Vérifié depuis HA le 18/08, il répond (`ping` et
+        # `properties/report` complet) — que la résolution vienne d'Avahi ou d'Unbound/OPNsense,
+        # qui enregistre les baux DHCP, elle suit l'appareil.
+        self.hostName = f"zendure-{definition['productModel'].replace(' ', '')}-{self.snNumber}.local"
+        # ⚠️ ON ALTERNE, ON NE CUMULE PAS. Essayer les deux adresses à chaque appel doublerait le
+        # gel du cycle (1 s -> 2 s) précisément quand l'appareil est déjà en difficulté. On bascule
+        # donc d'un candidat à l'autre après HTTP_FAILS_SWAP échecs : le coût par cycle reste d'un
+        # seul délai d'attente, et on retrouve l'appareil dès que l'un des deux chemins redevient
+        # valide. Sur le cas du 17/08 : récupération en 3 cycles au lieu de 25 heures.
+        self._hosts = [self.ipAddress] + ([self.hostName] if self.hostName != self.ipAddress else [])
+        self._host_idx = 0
+        self._http_fails = 0
 
         self.topic_read = f"iot/{self.prodkey}/{self.deviceId}/properties/read"
         self.topic_write = f"iot/{self.prodkey}/{self.deviceId}/properties/write"
@@ -891,16 +917,34 @@ class ZendureZenSdk(ZendureDevice):
         else:
             self.mqttPublish(self.topic_write, command, self.mqtt)
 
+    def _http_host(self) -> str:
+        """Adresse à interroger : le candidat courant (IP du cloud ou nom mDNS)."""
+        return self._hosts[self._host_idx] if self._hosts else self.ipAddress
+
+    def _http_ok(self) -> None:
+        self._http_fails = 0
+
+    def _http_ko(self) -> None:
+        """Un échec de plus ; au bout de HTTP_FAILS_SWAP on essaie l'autre adresse."""
+        self._http_fails += 1
+        if self._http_fails >= HTTP_FAILS_SWAP and len(self._hosts) > 1:
+            self._host_idx = (self._host_idx + 1) % len(self._hosts)
+            self._http_fails = 0
+            self.ipAddress = self._hosts[self._host_idx]  # reflète l'adresse RÉELLEMENT utilisée
+            _LOGGER.warning("%s injoignable : bascule sur %s", self.name, self.ipAddress)
+
     async def httpGet(self, url: str, key: str | None = None) -> dict[str, Any]:
         try:
-            url = f"http://{self.ipAddress}/{url}"
+            url = f"http://{self._http_host()}/{url}"
             response = await self.session.get(url, headers=CONST_HEADER, timeout=CONST_TIMEOUT)
             payload = json.loads(await response.text())
             self.lastseen = datetime.now()
+            self._http_ok()
             return payload if key is None else payload.get(key, {})
         except Exception as e:
             _LOGGER.error("%s for %s during httpGet%s", type(e).__name__, self.name, f": {e}" if str(e) else "!")
             self.lastseen = datetime.min
+            self._http_ko()
         return {}
 
     async def httpPost(self, url: str, command: Any) -> bool:
@@ -908,11 +952,13 @@ class ZendureZenSdk(ZendureDevice):
             self.httpid += 1
             command["id"] = self.httpid
             command["sn"] = self.snNumber
-            url = f"http://{self.ipAddress}/{url}"
+            url = f"http://{self._http_host()}/{url}"
             await self.session.post(url, json=command, headers=CONST_HEADER, timeout=CONST_TIMEOUT)
+            self._http_ok()
         except Exception as e:
             _LOGGER.error("%s for %s during httpPost%s", type(e).__name__, self.name, f": {e}" if str(e) else "!")
             self.lastseen = datetime.min
+            self._http_ko()
             return False
         return True
 
