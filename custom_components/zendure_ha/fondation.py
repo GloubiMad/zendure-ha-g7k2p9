@@ -748,15 +748,26 @@ class FondationEngine:
             _LOGGER.warning("SolarFlow unlock %s : inverseMaxPower %s -> %s (écriture FLASH unique)", d.name, current, target)
             await d.doCommand({"properties": {"inverseMaxPower": target}})
             # Le bouton doit DIRE ce qu'il a fait : un warning dans les logs ne se voit pas.
-            persistent_notification.async_create(
-                self.hass,
-                f"**{d.name}** — `inverseMaxPower` {current} → **{target} W** "
-                f"({'demandé' if reglage > 0 else 'plaque du modèle'}, écriture flash unique).\n\n"
-                f"Vérifier dans une minute que la valeur **tient** : si elle retombe, le cloud la "
-                f"réécrit et il faut d'abord désactiver HEMS dans l'application Zendure.",
-                "Zendure — déblocage SolarFlow",
-                f"zendure_unlock_{d.deviceId}",
-            )
+            # ⛔ 1.4.3.55 — `self.hass` N'EXISTE PAS sur FondationEngine (ce n'est pas une
+            # entité HA, juste un objet tenu par le manager) : la 1.4.3.51 levait donc
+            # `'FondationEngine' object has no attribute 'hass'` à CHAQUE appui.
+            # ⚠️ L'écriture flash, elle, avait bien eu lieu — elle est juste au-dessus — mais
+            # l'utilisateur ne voyait qu'un échec et pouvait croire le déblocage raté. Vérifié
+            # le 19/08 : l'appareil rapportait `inverseMaxPower = 2400` malgré le message.
+            # Et le confort ne doit JAMAIS faire échouer l'action : la notification est donc
+            # enveloppée. Ce qui compte est déjà fait, et déjà journalisé en warning au-dessus.
+            try:
+                persistent_notification.async_create(
+                    self.manager.hass,
+                    f"**{d.name}** — `inverseMaxPower` {current} → **{target} W** "
+                    f"({'demandé' if reglage > 0 else 'plaque du modèle'}, écriture flash unique).\n\n"
+                    f"Vérifier dans une minute que la valeur **tient** : si elle retombe, le cloud la "
+                    f"réécrit et il faut d'abord désactiver HEMS dans l'application Zendure.",
+                    "Zendure — déblocage SolarFlow",
+                    f"zendure_unlock_{d.deviceId}",
+                )
+            except Exception as e:  # noqa: BLE001
+                _LOGGER.warning("SolarFlow unlock %s : notification impossible (%s) — l'écriture, elle, est faite", d.name, e)
 
     def createDeviceEntities(self) -> None:
         """Capteur de consigne + case « panneaux raccordés », par onduleur. À appeler APRÈS le
