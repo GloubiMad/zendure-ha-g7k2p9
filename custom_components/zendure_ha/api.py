@@ -228,7 +228,33 @@ class Api:
             client.on_message = self.mqttMsgCloud if client == self.mqttCloud else self.mqttMsgLocal if client == self.mqttLocal else self.mqttMsgDevice
             client.suppress_exceptions = True
             client.username_pw_set(user, psw)
-            client.connect(srv, int(port))
+            # ⛔ 1.4.3.54 — `connect()` AVANT `loop_start()` : si le premier LEVAIT, le second
+            # n'était JAMAIS appelé. Or sans boucle réseau, paho ne peut ni se connecter ni se
+            # reconnecter — plus JAMAIS, et sans autre trace que la ligne d'erreur ci-dessous.
+            # Seul un redémarrage de Home Assistant repassait par ici.
+            #
+            # Symptôme, rapporté par l'utilisateur le 18/08/2026 : « les 3 zendure étaient annoncés
+            # comme morts depuis plusieurs heures, j'ai juste rebooté HA sans toucher aux zendure
+            # et l'intégration les a vus de suite ». TROIS appareils muets EN MÊME TEMPS ne peuvent
+            # pas être trois pannes : c'est le lien commun.
+            # Mesuré sur la trace, 3 épisodes où les 3 ont Age > 120 s simultanément :
+            #   17/08 20:57->21:30 (34 min, repart seul) · 22:49->23:55 (66 min, repart seul)
+            #   18/08 00:04->00:47 (43 min, terminé par un redémarrage de HA)
+            # ⚠️ Les deux premiers se sont résolus SEULS : la boucle tournait donc dans ces cas-là
+            # et paho a reconnecté. Ce correctif explique le troisième, pas les deux autres — il y
+            # a eu en plus un incident réseau ce soir-là (c'est aussi ce qui a donné une nouvelle
+            # adresse au SolarFlow, cf. `device.py` et le repli mDNS de la 1.4.3.53).
+            #
+            # `connect_async` ne fait AUCUN I/O : il mémorise la cible et rend la main aussitôt.
+            # C'est `loop_start()` qui établit la connexion PUIS la rétablit indéfiniment — le
+            # motif recommandé par paho pour une liaison résiliente. Un broker absent au démarrage
+            # n'est donc plus fatal : la liaison s'établira dès qu'il répondra, au lieu de rester
+            # morte jusqu'au prochain redémarrage.
+            #
+            # ✅ Les abonnements, eux, sont déjà refaits à chaque connexion par `mqttConnect`
+            # (callback `on_connect`) : une reconnexion restaure tout, il n'y a rien à ajouter là.
+            client.reconnect_delay_set(min_delay=1, max_delay=60)
+            client.connect_async(srv, int(port))
             client.loop_start()
         except Exception as e:
             _LOGGER.error("Unable to connect to Zendure %s!", e)
