@@ -94,6 +94,10 @@ CHG_CAP_TTL = 600.0
 # **494 s** avec `Cmd` à 0. 30 s écarte donc 100 % du bruit de mesure (max observé 19 s) tout en
 # attrapant l'épisode réel dès sa 30e seconde.
 SUBIE_MIN = 30.0
+# ⛔ 1.4.4.2 — durée d'un export FRANC avant de forcer le routage du surplus (cf. `update`).
+# 3 s = 3 cycles : assez pour écarter le bruit de P1 et les rafales d'un nuage, assez peu pour ne
+# pas laisser partir un surplus installé. En dessous on ferait démarrer un onduleur pour rien.
+EXPORT_DWELL = 3.0
 
 # Marge de ré-exploration côté PRODUCTION. Volontairement bien plus petite que `chg_probe` :
 # offrir trop à un puits est gratuit (il refuse), demander trop à un producteur crée de l'import.
@@ -221,6 +225,7 @@ class FondationEngine:
         self.clead: dict[str, bool] = {}       # hystérésis sticky par device (charge)
         self.floor: dict[str, bool] = {}       # hystérésis de plancher SoC (sticky jusqu'à minSoc+3)
         self.surplus_active = False            # hystérésis du routage de surplus solaire (anti flip-flap)
+        self.export_since: datetime | None = None  # 1.4.4.2 : 1er cycle d'un export FRANC consécutif
         self.occ = 1.0                         # taux d'occupation autorisé du parc (cf. `load_max`)
         self.idle_since: datetime | None = None      # instant d'entrée en IDLE (gel de l'intégrale)
         self.idle_regime: ManagerState | None = None  # régime AVANT l'entrée en IDLE (anti-contamination)
@@ -1347,7 +1352,38 @@ class FondationEngine:
             # le surplus n'atteint jamais le bus). On commande donc le producteur à sortir son solaire
             # utilisable en plus (base + charge), et la batterie sans PV à l'absorber. Ce que up ne peut
             # pas prendre reste encaissé par le producteur (repli naturel, aucune consigne).
-            if demand > 0:
+            # ⛔ 1.4.4.2 — `demand > 0` SAUTAIT LE ROUTAGE PENDANT UN EXPORT MESURÉ.
+            #
+            # `demand = max(0, t_amt) + integ` est bâti sur `house_load`, et house_load est AVEUGLE
+            # au déversement autonome — c'est écrit plus haut dans ce fichier : « la sortie de
+            # l'appareil s'ajoute dans house_load = P1 + Σhome, qui reste petit pendant qu'on
+            # exporte 1000 W. La SEULE mesure qui voit l'export, c'est P1 ».
+            # En IDLE `integ` est neutralisé (1.4.3.46), donc `demand = max(0, t_amt)` : un `t_amt`
+            # résiduel de 9 W suffisait à sauter TOUT le routage du surplus. En DISCHARGE
+            # l'anti-inversion (1.4.3.50) borne l'intégrale à `-max(0, t_amt)`, donc `demand >= 0`
+            # par construction : le routage n'était atteint que sur l'égalité exacte.
+            #
+            # MESURÉ le 20/08 sur 22 h — 556 cycles où P1 valait **-618 W en moyenne** pendant que
+            # le SolarFlow n'était commandé à RIEN (`cmd ≈ 0`, 2045 W de marge libre), `up` à
+            # -489 W seulement et glagla en DÉCHARGE à +741 W. Régimes : DISCHARGE 398, IDLE 133.
+            # Moyennes du moteur à ces instants : `hl=+116  amt=+336  int=+218` — il croyait que la
+            # maison DEMANDAIT 116 W pendant qu'on exportait 618 W.
+            #
+            # ⇒ On entre AUSSI dans le routage quand P1 voit un export FRANC et PERSISTANT.
+            # ⚠️ On ne force que l'ENTRÉE : tous les garde-fous internes (`surplus_on`/`surplus_off`,
+            # `_engage_ok`, `chg_room`, `prod_extra`) continuent de décider s'il y a vraiment
+            # quelque chose à router et vers qui. Si le parc ne peut rien prendre, `routable` vaut 0
+            # et rien ne change.
+            # ⚠️ PERSISTANCE OBLIGATOIRE : sans elle on réagirait au bruit de P1 et on ferait
+            # démarrer un onduleur sur un transitoire de 1 s. `EXPORT_DWELL` couvre les rafales.
+            if p1 < -self.db_on.asNumber:
+                if self.export_since is None:
+                    self.export_since = now
+            else:
+                self.export_since = None
+            export_persistant = self.export_since is not None and (now - self.export_since).total_seconds() >= EXPORT_DWELL
+
+            if demand > 0 and not export_persistant:
                 self.surplus_active = False  # pas de surplus : on relâche l'hystérésis
             else:
                 # Même plafond de LIVRAISON MESURÉE que dans la branche CHARGE (`prod_accept`) :
