@@ -59,6 +59,10 @@ CONST_HEADER = {"content-type": "application/json; charset=UTF-8"}
 # ⚠️ Effet de bord à connaître : sur exception, `httpGet`/`httpPost` posent `lastseen = datetime.min`,
 # ce qui fait passer le champ `Age` du CSV à −1 (« jamais vu »). Ce −1 est donc la CONSÉQUENCE du
 # délai dépassé, jamais la preuve que l'appareil a décroché.
+# ⚠️ ÉCART ASSUMÉ AVEC L'AMONT : la 1.4.4 est passée de 4 s à 2 s pour la raison exacte
+# décrite ci-dessus (« An unreachable device stalls that loop for the full timeout »).
+# On reste à 1 s : mesuré ICI, p99 = 118 ms, donc 8× de marge — et le 18/08 un appareil
+# injoignable a gelé le cycle à 1002 ms pendant 19 h ; à 2 s ç'aurait été 2002 ms.
 CONST_TIMEOUT = ClientTimeout(total=1)
 # Échecs consécutifs avant d'essayer l'autre adresse (cf. `_http_ko`). 3 = ~3 s de détection,
 # assez pour ne pas basculer sur un incident réseau passager, assez peu pour ne rien coûter.
@@ -70,7 +74,7 @@ class ZendureBattery(EntityDevice):
     """Zendure Battery class for devices."""
 
     @staticmethod
-    def get_battery_type(sn: str) -> tuple[str, str, float]:
+    def get_battery_type(sn: str, pack_type: int | None = None) -> tuple[str, str, float]:
         model = "???"
         match sn[0]:
             case "A":
@@ -81,8 +85,14 @@ class ZendureBattery(EntityDevice):
                     model = "AB1000"
                     kWh = 0.96
             case "B":
-                model = "AB1000S"
-                kWh = 0.96
+                # packType 70 is the SF4000 Mix AC+'s internal 8 kWh pack, which shares
+                # its serial prefix with the unrelated 0.96 kWh AB1000S.
+                if pack_type == 70:
+                    model = "I8000"
+                    kWh = 8.0
+                else:
+                    model = "AB1000S"
+                    kWh = 0.96
             case "C":
                 # External AB2000X and internal AB2000X of SF800+/SF800Pro/SF1600AC+ starting with CO4A. They are also described as additional battery in the Zendure App, even when they are integrated into the device.
                 model = "AB2000" + ("S" if sn[3] == "F" else "X" if sn[3] == "E" else "")
@@ -105,9 +115,9 @@ class ZendureBattery(EntityDevice):
         name = f"{model} {sn[-5:]}".strip()
         return name, model, kWh
 
-    def __init__(self, hass: HomeAssistant, sn: str, parent: EntityDevice) -> None:
+    def __init__(self, hass: HomeAssistant, sn: str, parent: EntityDevice, pack_type: int | None = None) -> None:
         """Initialize Device."""
-        name, model, self.kWh = ZendureBattery.get_battery_type(sn)
+        name, model, self.kWh = ZendureBattery.get_battery_type(sn, pack_type)
         super().__init__(hass, sn, name, model, "", sn, parent.sn)
         self.attr_device_info["serial_number"] = sn
         self.deltaVoltage = ZendureSensor(self, "deltaVoltage", None, "V", "voltage", "measurement", 3)
@@ -211,7 +221,18 @@ class ZendureDevice(EntityDevice):
         self.socLimit = ZendureSensor(self, "socLimit", state=0)
         self.byPass = ZendureSensor(self, "pass", state=0)
 
-        fuseGroups = {0: "unused", 1: "owncircuit", 2: "group800", 3: "group800_2400", 4: "group1200", 5: "group2000", 6: "group2400", 7: "group3600"}
+        fuseGroups = {
+            0: "unused",
+            1: "owncircuit",
+            2: "group800",
+            3: "group800_2400",
+            4: "group1200",
+            5: "group2000",
+            6: "group2400",
+            7: "group3600",
+            8: "group4000",
+            9: "group5000",
+        }
         self.fuseGroup = ZendureRestoreSelect(self, "fuseGroup", fuseGroups, None)
         self.acMode = ZendureSelect(self, "acMode", {1: "input", 2: "output"}, self.entityWrite, 1)
         self.electricLevel = ZendureSensor(self, "electricLevel", None, "%", "battery", "measurement")
@@ -419,7 +440,7 @@ class ZendureDevice(EntityDevice):
                     continue
 
                 if (bat := self.batteries.get(sn, None)) is None:
-                    bat = ZendureBattery(self.hass, sn, self)
+                    bat = ZendureBattery(self.hass, sn, self, b.get("packType"))
                     self.batteries[sn] = bat
 
                 # Always apply properties — including for newly created batteries.
@@ -840,23 +861,17 @@ class ZendureZenSdk(ZendureDevice):
             _LOGGER.error("Entity %s has no translation_key, cannot write property %s", entity.name, self.name)
             return
 
-        # Route limit writes through the power routines so they send the full command
-        # (smartMode/acMode), exactly like the manager does. A bare outputLimit/inputLimit
-        # property write is silently ignored when the device has dropped out of smart mode
-        # (observed on SolarFlow 2400 Pro at 100% SoC, see #1505).
-        if entity.propertyName == "outputLimit":
-            await self.discharge(value)
-        elif entity.propertyName == "inputLimit":
-            await self.charge(-value)
-        elif self.online and self.connection.value == 0:
+        if self.online and self.connection.value == 0:
             await super().entityWrite(entity, value)
         else:
             _LOGGER.info("Writing property %s %s => %s", self.name, entity.propertyName, value)
             await self.httpPost("properties/write", {"properties": {entity.propertyName: value}})
 
     async def dataRefresh(self, update_count: int) -> None:
-        if update_count == 0 and not self.online:
-            # cf. `power_get` : un dict vide est une EXCEPTION attrapée, pas une réponse.
+        # 1.4.4 amont : en zenSDK on interroge AUSSI au poll 60 s, pas seulement hors ligne.
+        # Mesuré avant de l'accepter : `dataRefresh` tourne 1×/min (SCAN_INTERVAL=60 s) quand
+        # `power_get` interroge ~1×/s -> +1,7 % de requêtes HTTP. Négligeable.
+        if (update_count == 0 and not self.online) or self.connection.value == SmartMode.ZENSDK:
             if json := await self.httpGet("properties/report"):
                 await self.mqttProperties(json)
 
