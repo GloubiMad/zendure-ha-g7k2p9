@@ -199,8 +199,47 @@ class MqttWatchdog:
         if not isinstance(d, ZendureLegacy):
             return  # pas de chemin de réveil connu pour ce type de device
 
-        if stage == 1:  # sonde légère : demande d'état
-            d.mqttPublish(d.topic_read, {"properties": ["getAll"]}, d.mqtt or Api.mqttLocal)
+        if stage == 1:
+            # ⛔ 1.4.4.3 — ON REFAIT CE QUE FAIT UN REDÉMARRAGE DE HA, SANS REDÉMARRER.
+            #
+            # Le 22/08, `up` est resté muet 4 h 33 : `Age` 16 611 s, valeurs FIGÉES au watt près
+            # (SoC 21, bat -203), retiré de la liste du moteur. Il fonctionnait pourtant — il a
+            # exécuté sa dernière consigne (-238 W) et chargé de 21 % à 46 %, soit ~960 Wh absorbés
+            # à l'insu du moteur, pendant que P1 montrait des exports jusqu'à -1055 W.
+            # Le log du broker le prouve : `r2wPe1KW` ABSENT du `.178` sur toute la plage, alors que
+            # glagla y encaissait une coupure « Protocol error » toutes les ~13 min et se
+            # reconnectait à chaque fois. Et `up` est revenu en `Conn = 10` — CLOUD, pas local.
+            #
+            # ⛔ Le firmware n'avait PAS abandonné : un simple redémarrage de HA l'a récupéré
+            # instantanément, et HA ne touche pas l'appareil. C'est donc l'INTÉGRATION qui était
+            # sourde. Ce qu'un redémarrage change et qu'un `getAll` ne change pas :
+            #   1. il RECONNECTE les clients MQTT (`Api.Connect` -> `mqttInit`) ;
+            #   2. `mqttConnect` (on_connect) RE-SOUSCRIT aux topics de tous les devices ;
+            #   3. `dataRefresh` interroge alors sur les DEUX brokers.
+            # Aucun des 4 paliers du watchdog ne faisait ces trois choses — d'où 4 h 33 de silence
+            # qu'aucune escalade ne pouvait lever.
+            #
+            # ⚠️ Une publication sur un client déconnecté échoue SANS ERREUR (paho renvoie un code
+            # que `mqttPublish` ne regarde pas) : les 273 `getAll` de ces 4 h 33 sont partis dans le
+            # vide sans laisser une ligne. D'où la reconnexion explicite AVANT de republier.
+            for client in (Api.mqttLocal, Api.mqttCloud):
+                if client is None:
+                    continue
+                try:
+                    if not client.is_connected():
+                        _LOGGER.warning("Watchdog %s : client MQTT déconnecté -> reconnexion", d.name)
+                        client.reconnect()
+                    # re-souscription : exactement ce que fait `mqttConnect` au démarrage
+                    client.subscribe(f"/{d.prodkey}/{d.deviceId}/#")
+                    client.subscribe(f"iot/{d.prodkey}/{d.deviceId}/#")
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.warning("Watchdog %s : remise en liaison impossible (%s)", d.name, err)
+            # ⚠️ Sur les DEUX brokers, pas seulement celui où il parlait avant : `up` avait basculé
+            # sur le cloud, on l'interrogeait sur le local. C'est ce que fait `dataRefresh` quand
+            # `lastseen` a expiré, et le watchdog ne le faisait pas.
+            for client in (Api.mqttLocal, Api.mqttCloud):
+                if client is not None:
+                    d.mqttPublish(d.topic_read, {"properties": ["getAll"]}, client)
 
         elif stage == 2:  # commande de réveil DIFFÉRENTE de la dernière consigne (anti no-op)
             if abs(self.manager.fondation.cmd_of(d)) > 10:
