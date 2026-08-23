@@ -99,6 +99,24 @@ SUBIE_MIN = 30.0
 # pas laisser partir un surplus installé. En dessous on ferait démarrer un onduleur pour rien.
 EXPORT_DWELL = 3.0
 
+# ⛔ 1.4.4.4 — SEUIL D'ENGAGEMENT POUR PLACER DU SOLAIRE.
+# `min_engage_chg` (500 W) protège d'un démarrage d'onduleur pour une part dérisoire : juste pour
+# la répartition ORDINAIRE. Mais il porte sur la PART de chaque puits, donc fractionner un surplus
+# entre deux batteries pouvait n'en engager AUCUNE — et comme les producteurs ne sortent que ce qui
+# a trouvé preneur (`r = alloue`), le solaire restait chez eux et partait au réseau.
+# MESURÉ (20→22/08) : 14 251 cycles où glagla produisait > 300 W, n'en plaçait pas ≥ 150 W, alors
+# qu'il restait ≥ 300 W de place ailleurs — **3 723 Wh** de gisement. Exemple 11:52:36 : PV 1626 W,
+# sortie 697 W, batterie 0, et 2 942 W de place libre chez les deux autres.
+# L'user avait dû passer la stratégie en « le plus gros d'abord » pour contourner : avec ce mode le
+# SolarFlow est servi en premier, prend tout d'un coup et franchit le seuil. Ça ne doit dépendre
+# d'aucun mode.
+# ⇒ Pour PLACER DU SOLAIRE uniquement, le seuil par part descend au minimum utile d'un onduleur
+# (60 W, cf. saga anti-cycling). Le garde-fou qui compte reste EN AMONT et est inchangé :
+# `surplus_on`/`surplus_off` décident s'il vaut la peine de router (300/150 W sur le TOTAL). On ne
+# démarre donc jamais pour 60 W isolés — on cesse seulement de bloquer la RÉPARTITION.
+SOLAR_ENGAGE = 60.0
+
+
 # Marge de ré-exploration côté PRODUCTION. Volontairement bien plus petite que `chg_probe` :
 # offrir trop à un puits est gratuit (il refuse), demander trop à un producteur crée de l'import.
 # 40 W laissent la production remonter d'elle-même quand l'appareil refroidit, pour un biais
@@ -1446,7 +1464,8 @@ class FondationEngine:
                         alloue = 0.0  # ⚠️ ce qui est RÉELLEMENT parti dans un puits (cf. plus bas)
                         for d in sinks:  # les batteries sans PV absorbent
                             take = min(rem, chg_room(d))
-                            if not self._engage_ok(d, take, me_chg, now, charge=True):
+                            # 1.4.4.4 : placer du solaire n'est pas la répartition ordinaire
+                            if not self._engage_ok(d, take, SOLAR_ENGAGE, now, charge=True):
                                 continue
                             cmd[d] -= take
                             rem -= take
@@ -1645,7 +1664,11 @@ class FondationEngine:
                     alloue = 0.0  # JUMEAU de l'étape 1bis en DISCHARGE : ne faire sortir que le placé
                     for d in sinks:  # les batteries sans PV absorbent en plus
                         take = min(r, chg_cap(d))
-                        if not self._engage_ok(d, take, me_chg, now, charge=True):
+                        # 1.4.4.4 : jumeau de l'étape 1bis en DISCHARGE — même règle, même raison.
+                        # ⚠️ Les deux DOIVENT bouger ensemble : c'est la forme exacte de tous les
+                        # bugs graves de ce fichier (une décision écrite à deux endroits, une seule
+                        # corrigée).
+                        if not self._engage_ok(d, take, SOLAR_ENGAGE, now, charge=True):
                             continue
                         cmd[d] -= take
                         r -= take
