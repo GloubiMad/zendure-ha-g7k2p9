@@ -251,6 +251,11 @@ class FondationEngine:
         self.out_capped: float = 0.0  # 1.4.3.52 : W retires par le plafond de sortie au dernier cycle
         self.dir_since: dict[str, datetime | None] = {}  # instant du 1er cycle d'inversion demandée (dwell en SECONDES)
         self.cmd_applied: dict[str, int] = {}  # dernière consigne RÉELLEMENT appliquée (slew-rate)
+        self.inflight_since: datetime | None = None  # 1.4.4.5 : début de l'épisode « consigne en vol »
+        # Exposés pour `_apply_and_report`, qui est une AUTRE fonction (même motif que `out_capped`) :
+        # `_direct_control` y arrive sans passer par le calcul, d'où l'initialisation ici.
+        self.inflight: float = 0.0
+        self.en_vol: bool = False
         # Consigne envoyée au device (signée : + décharge / − charge). Lue par simulation.csv et par
         # le watchdog (choix d'une commande de réveil DIFFÉRENTE). Vit ici : c'est le moteur qui commande.
         self.cmd_target: dict[str, int] = {}
@@ -1158,6 +1163,56 @@ class FondationEngine:
         cmin = -sum(self._pmax(d, charge=True) for d in devices if d.state != DeviceState.SOCFULL)
         sat_dis = house_net >= imax - db_on                             # déchargé à fond
         sat_chg = house_net <= cmin + db_on                             # chargé à fond
+        # --- 1.4.4.5 — ANTI-WINDUP SUR LE TEMPS MORT (jumeau TEMPOREL de sat_dis/sat_chg) -----
+        # `sat_dis`/`sat_chg` ne couvrent qu'une seule façon d'être au bout de ce qu'on peut faire :
+        # la saturation en AMPLITUDE (« plus rien à mobiliser »). Il en existe une seconde, en
+        # TEMPS : la consigne est PARTIE mais l'appareil ne l'a pas encore réalisée. Tant qu'elle
+        # est en vol, l'écart de P1 est DÉJÀ couvert par une commande en cours — le recharger dans
+        # l'intégrale, c'est commander deux fois la même chose.
+        #
+        # ⚠️ Ce mécanisme est déjà connu de ce fichier, et déjà neutralisé — mais à UN SEUL endroit.
+        # Cf. le commentaire de `sub` (charge subie, 1.4.3.47) : « `Home` (rapporté) et `asked`
+        # (écrit à l'instant du calcul) ne datent pas du même moment : leur écart passe brièvement à
+        # quelques centaines de watts à chaque changement de consigne, sans que l'appareil ait quoi
+        # que ce soit à se reprocher. » Exactement le même bruit, la même cause — reconnu pour le
+        # tri des puits, ignoré par l'intégrale. C'est la forme que prennent tous les bugs graves de
+        # ce fichier : une décision écrite à deux endroits, corrigée à un seul.
+        #
+        # MESURÉ le 04/09/2026 sur 259 s (simulation.csv, HA redémarré à 14:36) :
+        #   · un Hyper met 2,7 s à encaisser une baisse, 10,8 à 11,7 s à démarrer depuis 0 ;
+        #   · pendant ce temps mort P1 reste positif — non par manque de puissance, mais parce que
+        #     celle qu'on a demandée n'est pas encore arrivée ;
+        #   · l'intégrale le lit comme un manque : 74 -> 174 -> 272 -> 298 en 10 s, avec 490 W déjà
+        #     commandés et non rapportés (`Σcmd`=917, `ΣHome`=427, figé) ;
+        #   · puis `up` arrive : P1 saute de +108 à -399, l'intégrale plonge à -481, le moteur coupe ;
+        #   · bilan : 14 bascules on/off de `up` en 4 min (1 toutes les 18 s), dont 4 extinctions de
+        #     moins de 8 s, chacune payée d'un redémarrage à froid de 10-12 s.
+        #   · commande en vol médiane : +148 W quand l'intégrale monte, +1 W quand elle est stable.
+        #
+        # EN VOL = ce qu'on a COMMANDÉ moins ce qui est RAPPORTÉ, sur le même jeu de devices que
+        # `house_net` (un device retiré de la liste ne compte dans aucun des deux termes).
+        # POSITIF = on attend encore de la décharge -> un P1 positif est déjà couvert.
+        # NÉGATIF = on attend encore de la charge   -> un P1 négatif est déjà couvert.
+        # Le test est écrit pour les DEUX sens, sinon on refait le bug jumeau du fichier.
+        #
+        # SEUIL = `db_on` (la zone morte du moteur) : en-dessous, ce n'est pas un écart significatif.
+        # Pas de nouveau paramètre — un réglage de plus serait un réglage à désaccorder.
+        #
+        # BORNE DE TEMPS = `wake_grace` (15 s), dont c'est DÉJÀ le rôle exact : « tant qu'il est sous
+        # `wake_grace`, on ne conclut pas » qu'un appareil n'obéit pas. Au-delà, ce n'est plus une
+        # latence, c'est un refus : l'intégrale doit reprendre la main, sinon un appareil qui
+        # n'obéit jamais gèlerait la correction d'un import pour toujours. Les 12 épisodes mesurés
+        # durent 6,8 s en médiane et 12,6 s au maximum — la borne à 15 s ne coupe aucun cas légitime.
+        # `wake_grace` = 0 -> `en_vol` toujours faux = comportement d'avant la 1.4.4.5, exactement.
+        inflight = sum(float(self.cmd_applied.get(d.deviceId, 0)) for d in devices) - house_net
+        if abs(inflight) > db_on:
+            if self.inflight_since is None:
+                self.inflight_since = now
+        else:
+            self.inflight_since = None
+        wg = self.wake_grace.asNumber
+        en_vol = wg > 0 and self.inflight_since is not None and (now - self.inflight_since).total_seconds() < wg
+        self.inflight, self.en_vol = inflight, en_vol
         # ÉCRÊTAGE PERMANENT — et pas seulement au moment d'accumuler (trou de la 1.4.3.36).
         # `sat_dis` empêche l'intégrale de MONTER quand plus rien n'est mobilisable, mais il ne la
         # fait pas DESCENDRE : avec `imax` = 0, la vidange `max(imin, min(-p1, imax))` vaut 0 et la
@@ -1223,7 +1278,7 @@ class FondationEngine:
             if hold <= 0:
                 self.integral = 0.0
         elif self.regime == ManagerState.DISCHARGE:
-            if p1 > db_off and not sat_dis:
+            if p1 > db_off and not sat_dis and not (en_vol and inflight > db_on):
                 self.integral = min(self.integral + min(p1, step), imax)
             elif p1 < -db_off:
                 # CORRECTIF « B » ÉTENDU À LA DÉCHARGE (25/07) : sur un export, l'intégrale peut
@@ -1248,7 +1303,7 @@ class FondationEngine:
                 if self.integral > floor:
                     self.integral = max(floor, self.integral - max(imin, min(-p1, imax)))
                     self.integral = max(self.integral, -dis_base)
-        elif p1 < -db_off and not sat_chg:
+        elif p1 < -db_off and not sat_chg and not (en_vol and inflight < -db_on):
             self.integral = min(self.integral + min(-p1, step), imax)
         elif p1 > db_off:
             # CORRECTIF « B » : en CHARGE, l'intégrale peut devenir NÉGATIVE (= « charge moins »).
@@ -1811,6 +1866,7 @@ class FondationEngine:
             f"fondation regime={self.regime.name} hl={int(hl_raw)} forced={int(forced)} T={int(t_raw)}"
             f" ema={int(t_reg)} amt={int(self.amt_ema) if self.amt_ema is not None else 0}"
             f" int={int(self.integral)} sp={setpoint} occ={self.occ:.2f}"
+            f" vol={int(self.inflight)}{'*' if self.en_vol else ''}"
             # ⚠️ CHAQUE VALEUR EST PRÉFIXÉE DU DEVICE (28/07). Ces trois champs ne listaient que les
             # devices DÉJÀ mesurés : 1 ou 2 valeurs pour 3 appareils, sans moyen de savoir à qui
             # elles appartenaient. Un contrôle qui indexait par position sortait de FAUSSES
