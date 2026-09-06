@@ -116,6 +116,14 @@ EXPORT_DWELL = 3.0
 # démarre donc jamais pour 60 W isolés — on cesse seulement de bloquer la RÉPARTITION.
 SOLAR_ENGAGE = 60.0
 
+# ⏱️ 1.4.4.6 — TROU MAXIMAL DANS LE BESOIN pour que le dwell d'engagement reste CONTINU.
+# `_engage_ok` est appelé plusieurs fois par cycle (étapes 1/2/3, charge et décharge) : effacer le
+# chrono dès qu'une étape propose une part insuffisante le remettrait à zéro selon l'ORDRE des
+# appels. On mémorise donc le dernier instant où le besoin a été constaté, et le chrono ne repart
+# que si le besoin a disparu plus de `ENGAGE_GAP`. Cycle ~1 s, données rafraîchies toutes les 2,7 s
+# (mesuré) : 5 s laisse deux rafraîchissements de marge sans jamais recoller deux besoins distincts.
+ENGAGE_GAP = 5.0
+
 
 # Marge de ré-exploration côté PRODUCTION. Volontairement bien plus petite que `chg_probe` :
 # offrir trop à un puits est gratuit (il refuse), demander trop à un producteur crée de l'import.
@@ -252,6 +260,8 @@ class FondationEngine:
         self.dir_since: dict[str, datetime | None] = {}  # instant du 1er cycle d'inversion demandée (dwell en SECONDES)
         self.cmd_applied: dict[str, int] = {}  # dernière consigne RÉELLEMENT appliquée (slew-rate)
         self.inflight_since: datetime | None = None  # 1.4.4.5 : début de l'épisode « consigne en vol »
+        # 1.4.4.6 : par device, (début du besoin d'engagement, dernière fois qu'il a été constaté)
+        self.engage_since: dict[str, tuple[datetime, datetime]] = {}
         # Exposés pour `_apply_and_report`, qui est une AUTRE fonction (même motif que `out_capped`) :
         # `_direct_control` y arrive sans passer par le calcul, d'où l'initialisation ici.
         self.inflight: float = 0.0
@@ -313,10 +323,52 @@ class FondationEngine:
         """
         if me <= 0 or take <= 0 or self._is_producer(d, now):
             return True
+        running = abs(self.cmd_applied.get(d.deviceId, 0)) > 0
         acc = self.chg_accept.get(d.deviceId) if charge else self.prod_accept.get(d.deviceId)
-        if not acc and take >= (self.chg_probe.asNumber if charge else self.dis_probe.asNumber):
+        probe = self.chg_probe.asNumber if charge else self.dis_probe.asNumber
+        # Disjonction STRICTEMENT identique aux deux tests d'avant la 1.4.4.6 (exemption anti-verrou,
+        # puis seuil avec hystérésis) : elle est seulement mise en facteur pour que le dwell ci-dessous
+        # s'applique aux DEUX chemins. Un sondage de 3 s ne sonde rien — mesuré à 0 % de rendement.
+        if not ((not acc and take >= probe) or take >= (me / 2 if running else me)):
+            return False
+        if running:
+            self.engage_since.pop(d.deviceId, None)
             return True
-        return take >= (me / 2 if abs(self.cmd_applied.get(d.deviceId, 0)) > 0 else me)
+        # --- 1.4.4.6 — DWELL D'ENGAGEMENT : un RÉVEIL doit être mérité par la DURÉE du besoin ------
+        # Le seuil historique porte sur le MONTANT (« ne pas réveiller pour 86 W »). Il ne dit rien de
+        # la DURÉE, et c'est l'autre moitié du problème : réveiller pour 108 W pendant 2,7 s coûte un
+        # démarrage à froid et ne rend rien. Mesuré le 06/09/2026 sur 40 h de `simulation.csv`, en
+        # comparant les Wh COMMANDÉS aux Wh RÉELLEMENT sortis (`homeOutput`), par durée d'épisode :
+        #     < 5 s   ->   0 %      (up : 3 épisodes, 0,31 Wh commandés, 0,00 sorti)
+        #     5-15 s  ->   9 %      (up : 15 épisodes, 13,70 Wh commandés, 1,29 sorti)
+        #     15-60 s ->  35 %
+        #     > 60 s  ->  94 %
+        # Ce n'est pas propre à `up` : le SolarFlow fait 47 réveils de moins de 15 s sur la période
+        # (10 sous 5 s, 37 entre 5 et 15 s), à 12 % de rendement. Un onduleur à l'arrêt met 11,7 s à
+        # démarrer (cf. la fiche « démarrage à froid ») : tout engagement plus court que ça est perdu
+        # d'avance — on paie la mise en route et on coupe avant qu'il ait produit.
+        #
+        # ⭐ ÉCRIT ICI ET NULLE PART AILLEURS : `_engage_ok` est le SEUL point où l'on décide de
+        # réveiller un appareil, et il est appelé aux 8 endroits (décharge 1/2/3, charge 1/2/3, et les
+        # deux étapes SOLAR_ENGAGE). Le poser ici couvre les huit d'un coup — c'est exactement le
+        # « une décision écrite à deux endroits, corrigée à un seul » que ce fichier collectionne.
+        #
+        # SEUIL = `wake_grace` (15 s), dont c'est DÉJÀ le rôle : « tant qu'il est sous `wake_grace`,
+        # on ne conclut pas » qu'un appareil ne répond pas. Ici on ne conclut pas non plus qu'il faut
+        # le réveiller. Aucun paramètre nouveau ; `wake_grace` = 0 rend le dwell inopérant, soit le
+        # comportement d'avant la 1.4.4.6, exactement.
+        #
+        # COÛT RÉEL du retard : PAS 15 s. L'appareil met déjà 11,7 s à démarrer, donc on ne diffère
+        # que le solde. Et un besoin qui dure vraiment est simplement servi 15 s plus tard, par un
+        # appareil qui, lui, produira ses 94 %.
+        wg = self.wake_grace.asNumber
+        if wg <= 0:
+            return True
+        since, last = self.engage_since.get(d.deviceId, (now, now))
+        if (now - last).total_seconds() > ENGAGE_GAP:
+            since = now                      # le besoin avait disparu : on repart de zéro
+        self.engage_since[d.deviceId] = (since, now)
+        return (now - since).total_seconds() >= wg
 
     @staticmethod
     def _tag(i: int, d: ZendureDevice) -> str:
