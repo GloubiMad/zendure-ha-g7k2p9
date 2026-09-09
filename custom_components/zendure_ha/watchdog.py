@@ -37,6 +37,7 @@ from typing import Any
 from homeassistant.components import persistent_notification
 
 from .binary_sensor import ZendureBinarySensor
+from .const import ManagerMode
 from .device import ZendureDevice, ZendureLegacy
 from .sensor import ZendureSensor
 
@@ -54,6 +55,16 @@ WD_WAKE_NUDGE = 60  # W, écart de réveil quand la dernière consigne était nu
 WD_RECENT = 45  # s, fenêtre « a reparlé récemment » (garde d'entrée du toggle BLE)
 WD_RESPONSE = 8  # s, fenêtre de réponse pour créditer un probe
 
+# --- 1.4.4.9 — RÉÉMISSION DE L'ARRÊT ---------------------------------------------------------
+# `power_off` était un « envoie et oublie » déclenché sur un ÉVÉNEMENT UNIQUE : le changement de
+# mode. Si l'appareil était injoignable à cet instant précis, rien ne rattrapait. Mesuré le
+# 09/09/2026 à 21:36 : le moteur passe en `off`, `up` est muet depuis 545 s, son ordre part dans
+# le vide et il continue à décharger 855 W sur sa dernière consigne. Sur 127 h, `up` est
+# injoignable 1,9 % du temps (23 épisodes, jusqu'à 28 min) — autant d'occasions de rater l'arrêt.
+WD_OFF_RETRY = 30      # s entre deux réémissions ; l'appareil accuse en 184 ms, 30 s est large
+WD_OFF_TOL = 20        # W ; en dessous on considère l'appareil arrêté (bruit de mesure)
+WD_OFF_ALERT = 10      # tentatives avant de prévenir : ~5 min sans obtenir l'arrêt
+
 
 @dataclass
 class _WdState:
@@ -65,6 +76,11 @@ class _WdState:
     probe_at: datetime | None = None
     probe_kind: str = ""
     ble_running: bool = False  # single-flight du toggle BLE
+    # 1.4.4.9 — suivi de l'arrêt demandé mais pas constaté
+    off_since: datetime | None = None
+    off_last: datetime | None = None
+    off_tries: int = 0
+    off_alerted: bool = False
 
 
 class MqttWatchdog:
@@ -100,6 +116,9 @@ class MqttWatchdog:
                 "stalled": ZendureBinarySensor(d, "mqttStalled", None, "problem"),
                 "lastwake": ZendureSensor(d, "mqttLastWake", state="—"),
                 "broker": ZendureSensor(d, "mqttBroker", state="local"),
+                # 1.4.4.9 : reste à 0 tant que l'arrêt est obtenu du premier coup — donc aucun
+                # churn de recorder en fonctionnement normal.
+                "offretry": ZendureSensor(d, "mqttOffRetry", None, None, None, "measurement", 0, state=0),
             }
 
     def _e(self, d: ZendureDevice, key: str) -> Any:
@@ -116,6 +135,8 @@ class MqttWatchdog:
         t_power = int(getattr(self, "tPower", None).asNumber or WD_POWER) if hasattr(self, "tPower") else WD_POWER
         t_ble = int(getattr(self, "tBle", None).asNumber or WD_BLE) if hasattr(self, "tBle") else WD_BLE
         t_alert = int(getattr(self, "tAlert", None).asNumber or WD_ALERT) if hasattr(self, "tAlert") else WD_ALERT
+
+        self.reemettre_arret(now)
 
         for d in self.manager.devices:
             st = self.state(d)
@@ -191,6 +212,71 @@ class MqttWatchdog:
                 self.manager.hass.async_create_task(self.wake(d, 1))
 
     # ------------------------------------------------------------------ probes
+    def reemettre_arret(self, now: datetime) -> None:
+        """Réémet `power_off` tant qu'un appareil débite alors que le moteur est arrêté.
+
+        Séparée de l'escalade de silence, volontairement : un appareil peut être parfaitement
+        joignable et n'avoir quand même pas reçu l'ordre (message perdu, cf. 1.4.4.8). Les deux
+        problèmes n'ont ni la même cause ni le même critère de sortie. Et une méthode à part se
+        teste seule.
+
+        CRITÈRE DE SORTIE = LA MESURE, PAS L'ENVOI. On ne s'arrête pas quand on a « réussi à
+        publier » — la 1.4.4.8 rappelle qu'un `rc == 0` ne prouve pas l'exécution — mais quand
+        l'appareil ne débite plus. C'est la seule preuve qui vaille.
+
+        Ne dépend PAS de `lastreport` : la boucle d'escalade s'arrête sur `datetime.min` (appareil
+        jamais vu), or c'est précisément un appareil dont on ne sait rien qu'il faut continuer
+        d'essayer d'arrêter.
+        """
+        if getattr(self.manager, "operation", None) != ManagerMode.OFF:
+            return
+
+        for d in self.manager.devices:
+            st = self.state(d)
+            debit = abs(d.homeOutput.asInt - d.homeInput.asInt)
+            if debit <= WD_OFF_TOL:
+                if st.off_tries and not st.off_alerted:
+                    _LOGGER.info("Watchdog %s: arrêt obtenu après %d réémission(s)", d.name, st.off_tries)
+                st.off_since = None
+                st.off_last = None
+                st.off_tries = 0
+                st.off_alerted = False
+                self._set(d, "offretry", 0)
+                continue
+
+            if st.off_since is None:
+                st.off_since = now
+            if st.off_last is not None and (now - st.off_last).total_seconds() < WD_OFF_RETRY:
+                continue
+
+            st.off_last = now
+            st.off_tries += 1
+            self._set(d, "offretry", st.off_tries)
+            _LOGGER.warning(
+                "Watchdog %s: moteur à l'arrêt mais l'appareil débite encore %d W — "
+                "réémission de power_off (tentative %d)", d.name, debit, st.off_tries,
+            )
+            self.manager.hass.async_create_task(d.power_off())
+
+            # PRÉVENIR UNE FOIS, puis continuer d'essayer. Renoncer laisserait l'appareil
+            # débiter sans limite ; alerter à chaque tentative noierait le journal.
+            if st.off_tries >= WD_OFF_ALERT and not st.off_alerted:
+                st.off_alerted = True
+                persistent_notification.async_create(
+                    self.manager.hass,
+                    f"**{d.name}** débite encore **{debit} W** alors que le moteur est à l'arrêt, "
+                    f"après **{st.off_tries}** tentatives d'arrêt sur "
+                    f"{int((now - st.off_since).total_seconds() / 60)} min.\n\n"
+                    f"L'appareil ne reçoit pas ses commandes ou ne les applique pas. "
+                    f"Vérifier `mqttOffRetry`, `mqttBroker` et le sélecteur de connexion.",
+                    "Zendure — arrêt non obtenu",
+                    f"zendure_offstuck_{d.deviceId}",
+                )
+            self.manager.hass.bus.async_fire(
+                "zendure_power_off_retry",
+                {"device": d.name, "device_id": d.deviceId, "watts": debit, "tries": st.off_tries},
+            )
+
     async def wake(self, d: ZendureDevice, stage: int) -> None:
         """Tentative de réveil. Seuls les devices MQTT+BLE (Legacy) savent le faire aujourd'hui ;
         les ZenSDK (HTTP local) seront traités plus tard avec leurs propres actes."""
