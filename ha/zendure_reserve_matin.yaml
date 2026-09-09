@@ -1,0 +1,530 @@
+# =============================================================================
+#  Zendure - RESERVE DU MATIN
+#  Pendant les heures creuses, garde dans les batteries de quoi tenir le matin
+#  en HP jusqu'a ce que le solaire prenne le relais.
+#
+#  HC 21:36 -> 05:36   |   HP 05:36 -> 21:36   (source : binary_sensor Linky)
+#
+#  /!\ Le moteur tourne en `smart_fondation`. JAMAIS `smart` : c'est l'ancien
+#      moteur MATCHING de l'amont, sans aucun de nos correctifs. Les anciennes
+#      automatisations (Zendure demarage HP up, Stop culumus HC) font cette
+#      erreur - elles sont desactivees, ne pas les reactiver telles quelles.
+#
+# -----------------------------------------------------------------------------
+#  TOUT SE DECIDE EN CONTINU PENDANT LES HC, jamais en differe
+# -----------------------------------------------------------------------------
+#  Une version precedente relevait la conso a 05:35 pour s'en servir la nuit
+#  SUIVANTE. Inutile : la conso hors cumulus ne varie pas selon le moment de la
+#  nuit. Mesure du 04 au 09/09 (mediane / moyenne / p90, en W) :
+#
+#      21:36-23:36  531 / 454 / 563     debut des HC
+#      23:36-01:36  529 / 537 / 616
+#      00:00-05:35  521 / 527 / 575
+#      01:36-05:36  519 / 523 / 564     coeur de nuit
+#
+#  Le debut de HC est donc aussi representatif que le reste. On mesure la nuit
+#  EN COURS sur une fenetre glissante de 2 h, et on recalcule chaque minute :
+#    - stock bas  -> l'heure de coupure tombe tot, potentiellement avant minuit
+#    - stock haut -> le moteur continue, et peut meme reprendre avant 05:36
+#
+#  Le cumulus chauffe 62,7 % du temps entre 21:36 et 23:36 ; ses echantillons
+#  sont ecartes, il reste largement de quoi alimenter la moyenne.
+#
+#  La premiere decision tombe des 21:36, sans delai d'amorcage. A cet instant la
+#  fenetre glissante couvre encore la SOIREE (19:36-21:36) : verifie, c'est
+#  utilisable et le biais va dans le sens prudent (mediane / moyenne / p90,
+#  hors cumulus) :
+#      20:06-21:36 soiree HP   538 / 565 / 667 W   (15715 echantillons)
+#      01:36-05:36 pleine nuit 519 / 523 / 564 W
+#  soit +3 % sur la mediane : on reserve legerement trop, jamais trop peu.
+#
+#  Une garde de 30 min existait ici. Retiree : elle coutait 262 Wh preleves sur
+#  la reserve quand le stock est deja bas a l'entree en HC et que le cumulus ne
+#  chauffe pas (coupure a 22:06 au lieu de 21:36), pour un gain de precision que
+#  les chiffres ci-dessus ne justifient pas.
+#
+#  A deposer dans  config/packages/zendure_reserve_matin.yaml
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+#  /!\ AUCUN `initial:`, et les `min:` SONT les valeurs nominales
+# -----------------------------------------------------------------------------
+#  Un input_number YAML se comporte ainsi :
+#    - sans `initial:` il restaure sa derniere valeur, mais au TOUT PREMIER
+#      chargement il n'y a rien a restaurer : il prend `min` ;
+#    - avec `initial:` il force cette valeur A CHAQUE redemarrage, donc efface
+#      les reglages faits depuis l'interface (meme famille de piege que les
+#      parametres du moteur non restaures : l'UI affiche une valeur, le calcul
+#      en utilise une autre).
+#  On garde donc la restauration, et le `min` fait office de valeur de depart.
+#
+#  ERREUR CORRIGEE LE 09/09 : une version precedente placait ces `min` BAS
+#  (300 W, 1.0, 300 W) en croyant que c'etait "prudent". C'est l'inverse. Sur ce
+#  calcul, TOUS les parametres poussent dans le meme sens :
+#      conso ^  -> reserve ^        facteur ^ -> reserve ^
+#      seuil solaire ^ -> heure solaire plus TARD -> duree ^ -> reserve ^
+#  Un `min` bas donne donc une reserve TROP PETITE, c'est-a-dire une decharge
+#  TROP LONGUE et un manque le matin. Constate en production : reserve affichee
+#  a 1020 Wh (= 300 x 1.0 x 3,40 h) contre 2033 attendus, soit 62 % du besoin
+#  reel le plus faible mesure (1632 Wh).
+#  Les `min` valent maintenant les valeurs nominales : la borne basse est la
+#  valeur SURE, et on ne peut regler qu'en montant, donc que vers plus de marge.
+# -----------------------------------------------------------------------------
+input_number:
+  zendure_conso_nuit_defaut:
+    # Repli quand la moyenne glissante n'est pas encore exploitable (HA vient de
+    # demarrer). 520 W = la mediane mesuree, identique sur les quatre fenetres
+    # de la nuit. C'est aussi le `min` : on ne descend pas sous la mesure.
+    name: Zendure - conso nocturne par defaut
+    min: 520
+    max: 3000
+    step: 10
+    unit_of_measurement: W
+    icon: mdi:backup-restore
+    mode: box
+
+  zendure_facteur_matin:
+    # Mesure du 04 au 09/09 : la mediane du matin est la MEME que la nuit
+    # (~520 W), mais la moyenne monte de 525 W a 569 W entre 06:00 et 09:00 et
+    # le p90 passe de 550-600 W a 800-900 W : la maison se reveille par pointes
+    # breves, pas par un palier. 1.15 les couvre sans surdimensionner, et c'est
+    # la borne basse : en dessous on ne couvrirait meme plus la moyenne du matin.
+    name: Zendure - facteur de conso du matin
+    min: 1.15
+    max: 2.5
+    step: 0.05
+    icon: mdi:sun-clock-outline
+    mode: box
+
+  zendure_solaire_seuil_w:
+    # "le solaire est suffisant" = la prevision Solcast depasse ce seuil.
+    # 520 W = la conso de fond mesuree : en dessous, on declarerait le solaire
+    # suffisant alors qu'il ne couvre meme pas la maison, l'heure tomberait trop
+    # tot et la reserve serait raccourcie a tort. D'ou ce plancher.
+    name: Zendure - seuil solaire suffisant
+    min: 520
+    max: 3000
+    step: 10
+    unit_of_measurement: W
+    icon: mdi:weather-sunny
+    mode: box
+
+  zendure_marge_reprise:
+    # Hysteresis entre couper et reprendre, en %. Sans elle, une decision prise
+    # chaque minute sur un seuil nu ferait battre le moteur autour du seuil -
+    # exactement ce que la 1.4.4.6 vient de corriger cote moteur, ou un
+    # engagement de moins de 15 s ne produit rien du tout.
+    # `min` a 5 : une hysteresis minimale est toujours garantie, meme au premier
+    # demarrage. Pour desactiver la reprise, arreter l'automatisation, pas
+    # descendre la marge a zero.
+    name: Zendure - marge de reprise
+    min: 5
+    max: 50
+    step: 1
+    unit_of_measurement: "%"
+    icon: mdi:arrow-expand-vertical
+    mode: box
+
+input_boolean:
+  zendure_reserve_atteinte:
+    name: Zendure - reserve du matin atteinte
+    icon: mdi:battery-lock
+
+  zendure_reserve_matin_active:
+    name: Zendure - gestion reserve matin (interrupteur general)
+    icon: mdi:toggle-switch-outline
+
+template:
+  - sensor:
+      # --- conso maison HORS chauffe cumulus ------------------------------
+      # Le cumulus fausse tout : 2294 W de moyenne la nuit du 05/09 (il
+      # chauffait) contre ~530 W les autres nuits, soit un facteur 4,3.
+      # On renvoie `unavailable` pendant la chauffe : le capteur `statistics`
+      # plus bas ecarte alors l'echantillon au lieu de l'integrer.
+      #
+      # Reste valide moteur coupe : house_load = P1 + somme(sorties Zendure).
+      # Moteur a l'arret, les sorties valent 0 et house_load se confond avec P1,
+      # donc avec la conso de la maison. La mesure ne depend pas de la decision.
+      - name: Zendure house load hors cumulus
+        unique_id: zendure_house_load_hors_cumulus
+        unit_of_measurement: W
+        device_class: power
+        state: >
+          {% set hl = states('sensor.zendure_manager_fondation_house_load') | float(-1) %}
+          {% set cu = states('sensor.cave_cumulus_puissance') | float(0) %}
+          {% if hl < 0 or cu > 200 %}unavailable{% else %}{{ hl | round(0) }}{% endif %}
+
+      # --- conso nocturne RETENUE ------------------------------------------
+      # Point unique de verite : tout le reste du package lit CE capteur.
+      #
+      # /!\ Ne PAS ecrire `states('sensor...') | float(520)` en esperant un
+      # repli : en Jinja le defaut ne joue QUE si la conversion echoue. Une
+      # valeur "0.0" se convertit tres bien en 0.0 -> la reserve vaudrait 0 ->
+      # la condition de coupure serait toujours fausse -> le moteur ne serait
+      # JAMAIS coupe. D'ou le test explicite sur > 100.
+      - name: Zendure conso nuit retenue
+        unique_id: zendure_conso_nuit_retenue
+        unit_of_measurement: W
+        device_class: power
+        state: >
+          {% set g = states('sensor.zendure_conso_nuit_statistique') | float(0) %}
+          {% set repli = states('input_number.zendure_conso_nuit_defaut') | float(520) %}
+          {% if g > 100 %}{{ g | round(0) }}{% else %}{{ repli | round(0) }}{% endif %}
+        attributes:
+          source: >
+            {% set g = states('sensor.zendure_conso_nuit_statistique') | float(0) %}
+            {% if g > 100 %}mesure glissante 2 h (nuit en cours)
+            {% else %}valeur de repli (moyenne pas encore exploitable)
+            {% endif %}
+
+      # --- heure a laquelle le solaire devient suffisant -------------------
+      # Avant 06:00 le matin vise est AUJOURD'HUI ; apres, c'est DEMAIN.
+      #
+      # Solcast n'expose PAS d'entite par demi-heure : le detail est un
+      # ATTRIBUT des capteurs "previsions pour aujourd'hui / demain". Il ne
+      # figure pas dans la liste des entites, et il est exclu du recorder
+      # (UNRECORDED_ATTRIBUTES dans sensor.py) donc absent des etats sauvegardes
+      # - il existe bien en memoire et un template le lit sans probleme.
+      # Pour le voir : Outils de developpement > Etats > le capteur > attributs.
+      #
+      # Options de TON installation (lues dans core.config_entries) :
+      #   attr_brk_halfhourly = True  -> `detailedForecast` produit (30 min)
+      #   attr_brk_hourly     = True  -> `detailedHourly` produit (1 h)
+      #   attr_brk_detailed   = False -> seule la ventilation PAR SITE est
+      #                                  desactivee (detailedForecast_<site>),
+      #                                  l'attribut principal reste la.
+      # On essaie les deux, puis on retombe sur `unknown` -> la reserve prend
+      # alors son repli de 3,5 h.
+      - name: Zendure heure solaire suffisant
+        unique_id: zendure_heure_solaire_suffisant
+        icon: mdi:sun-clock
+        state: >
+          {% set seuil = states('input_number.zendure_solaire_seuil_w') | float(520) %}
+          {% set src = 'sensor.solcast_pv_forecast_previsions_pour_aujourd_hui'
+                       if now().hour < 6 else
+                       'sensor.solcast_pv_forecast_previsions_pour_demain' %}
+          {% set det = state_attr(src, 'detailedForecast')
+                       or state_attr(src, 'detailedHourly') %}
+          {% if det is not iterable or det is string %}
+            unknown
+          {% else %}
+            {% set ns = namespace(h='unknown') %}
+            {% for p in det %}
+              {% if ns.h == 'unknown' and (p.pv_estimate | float(0)) * 1000 >= seuil %}
+                {% set ns.h = as_local(p.period_start | as_datetime).strftime('%H:%M') %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.h }}
+          {% endif %}
+        attributes:
+          source_prevision: >
+            {% set src = 'sensor.solcast_pv_forecast_previsions_pour_aujourd_hui'
+                         if now().hour < 6 else
+                         'sensor.solcast_pv_forecast_previsions_pour_demain' %}
+            {% if state_attr(src,'detailedForecast') %}detailedForecast (30 min)
+            {% elif state_attr(src,'detailedHourly') %}detailedHourly (1 h)
+            {% else %}aucun attribut detaille - la reserve utilise son repli de 3,5 h
+            {% endif %}
+
+      # --- energie a reserver pour le matin --------------------------------
+      # (duree 05:36 -> heure solaire) x conso retenue x facteur matin.
+      # 336 = 05:36 exprime en minutes depuis minuit.
+      # Repere mesure, energie reellement consommee 05:36 -> 09:00 sur 4 jours :
+      # 1632, 1789, 1932 et 2441 Wh. Si Solcast ne repond pas, on retombe sur
+      # 3,5 h (05:36 -> ~09:06), coherent avec ces releves.
+      - name: Zendure reserve matin
+        unique_id: zendure_reserve_matin
+        unit_of_measurement: Wh
+        device_class: energy
+        state: >
+          {% set hs = states('sensor.zendure_heure_solaire_suffisant') %}
+          {% set p = states('sensor.zendure_conso_nuit_retenue') | float(520) %}
+          {% set f = states('input_number.zendure_facteur_matin') | float(1.15) %}
+          {% if hs in ['unknown','unavailable','none',''] %}
+            {{ (p * f * 3.5) | round(0) }}
+          {% else %}
+            {% set fin = (hs.split(':')[0] | int) * 60 + (hs.split(':')[1] | int) %}
+            {% set heures = [0, (fin - 336) / 60] | max %}
+            {{ (p * f * heures) | round(0) }}
+          {% endif %}
+
+      # --- energie encore disponible dans le parc, en Wh --------------------
+      - name: Zendure energie disponible wh
+        unique_id: zendure_energie_disponible_wh
+        unit_of_measurement: Wh
+        device_class: energy
+        state: >
+          {{ (states('sensor.zendure_manager_available_kwh') | float(0) * 1000) | round(0) }}
+
+      # --- heure prevue de coupure -----------------------------------------
+      # Recalculee en continu : c'est elle qu'on regarde des 21:36 pour savoir
+      # si la nuit va tenir. Stock bas -> une heure avant minuit. Stock haut ->
+      # une heure apres 05:36, c'est-a-dire aucune coupure.
+      # INFORMATIF : la coupure reelle se decide sur la reserve MESUREE, pas sur
+      # cette heure - une conso constante n'est qu'une hypothese.
+      - name: Zendure heure coupure hc prevue
+        unique_id: zendure_heure_coupure_hc_prevue
+        icon: mdi:clock-alert-outline
+        state: >
+          {% set dispo = states('sensor.zendure_energie_disponible_wh') | float(0) %}
+          {% set res = states('sensor.zendure_reserve_matin') | float(0) %}
+          {% set p = states('sensor.zendure_conso_nuit_retenue') | float(520) %}
+          {% if p <= 0 %}unknown
+          {% elif dispo <= res %}maintenant
+          {% else %}{{ (now() + timedelta(hours=(dispo - res) / p)).strftime('%H:%M') }}
+          {% endif %}
+        attributes:
+          tient_toute_la_nuit: >
+            {% set dispo = states('sensor.zendure_energie_disponible_wh') | float(0) %}
+            {% set res = states('sensor.zendure_reserve_matin') | float(0) %}
+            {% set p = states('sensor.zendure_conso_nuit_retenue') | float(520) %}
+            {% if p <= 0 or dispo <= res %}false
+            {% else %}{{ (now() + timedelta(hours=(dispo - res) / p)).hour >= 5
+                          and (now() + timedelta(hours=(dispo - res) / p)).hour < 12 }}
+            {% endif %}
+
+      # --- autonomie restante, en heures -----------------------------------
+      - name: Zendure autonomie restante
+        unique_id: zendure_autonomie_restante
+        unit_of_measurement: h
+        state: >
+          {% set p = states('sensor.zendure_conso_nuit_retenue') | float(520) %}
+          {% if p <= 0 %}0{% else %}{{ (states('sensor.zendure_energie_disponible_wh') | float(0) / p) | round(2) }}{% endif %}
+
+sensor:
+  # Moyenne glissante sur 2 h de la conso hors cumulus. Fenetre courte a dessein :
+  # elle se recale vite en entrant dans les HC, et suit la nuit EN COURS.
+  # Les echantillons `unavailable` (chauffe cumulus) sortent d'eux-memes.
+  - platform: statistics
+    name: Zendure conso nuit statistique
+    unique_id: zendure_conso_nuit_statistique
+    entity_id: sensor.zendure_house_load_hors_cumulus
+    state_characteristic: mean
+    max_age:
+      hours: 2
+    sampling_size: 12000
+
+automation:
+  # -------------------------------------------------------------------------
+  - id: zendure_reserve_entree_hc_cumulus
+    alias: Zendure - couper le moteur DES l'entree en HC si le cumulus doit chauffer
+    description: >
+      Le cumulus demarre a l'entree en HC quand la chauffe est demandee : mesure
+      du 04 au 09/09, il est actif 75 % du temps entre 21:36 et 22:06, et 62,7 %
+      entre 21:36 et 23:36. Sans cette anticipation, on attendrait que sa
+      puissance monte puis tienne 20 s avant de couper - pendant lesquelles le
+      moteur essaie de couvrir 2400 W en puisant dans les batteries.
+      On coupe donc AU BASCULEMENT tarifaire, sur l'intention de chauffe
+      (`cumulus_a_chauffer`), sans attendre de mesurer quoi que ce soit.
+      La reprise reste geree par `Zendure - reprendre apres la chauffe cumulus`.
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.linky_02330101298371_heures_creuses_actives
+        from: "off"
+        to: "on"
+    conditions:
+      - condition: state
+        entity_id: input_boolean.zendure_reserve_matin_active
+        state: "on"
+      - condition: or
+        conditions:
+          - condition: state
+            entity_id: input_boolean.cumulus_a_chauffer
+            state: "on"
+          - condition: state
+            entity_id: input_boolean.cumulus_force
+            state: "on"
+          - condition: numeric_state
+            entity_id: sensor.cave_cumulus_puissance
+            above: 200
+    actions:
+      - action: select.select_option
+        target:
+          entity_id: select.zendure_manager_operation
+        data:
+          option: "off"
+    mode: single
+
+  # -------------------------------------------------------------------------
+  - id: zendure_reserve_cumulus_hc_off
+    alias: Zendure - couper le moteur pendant la chauffe cumulus en HC
+    description: >
+      Le cumulus est une charge de 2400 W non modulable. La couvrir avec les
+      batteries revient a rendre du stock a 0,1376 EUR/kWh : autant le laisser
+      sur le reseau au tarif creux.
+    triggers:
+      - trigger: numeric_state
+        entity_id: sensor.cave_cumulus_puissance
+        above: 200
+        for: "00:00:20"
+    conditions:
+      - condition: state
+        entity_id: input_boolean.zendure_reserve_matin_active
+        state: "on"
+      - condition: state
+        entity_id: binary_sensor.linky_02330101298371_heures_creuses_actives
+        state: "on"
+    actions:
+      - action: select.select_option
+        target:
+          entity_id: select.zendure_manager_operation
+        data:
+          option: "off"
+    mode: single
+
+  # -------------------------------------------------------------------------
+  - id: zendure_reserve_cumulus_fin
+    alias: Zendure - reprendre apres la chauffe cumulus
+    description: >
+      On ne reprend QUE si la reserve du matin n'est pas deja atteinte, sinon
+      on annulerait la coupure decidee plus tot dans la nuit.
+    triggers:
+      - trigger: numeric_state
+        entity_id: sensor.cave_cumulus_puissance
+        below: 200
+        for: "00:01:00"
+    conditions:
+      - condition: state
+        entity_id: input_boolean.zendure_reserve_matin_active
+        state: "on"
+      - condition: state
+        entity_id: binary_sensor.linky_02330101298371_heures_creuses_actives
+        state: "on"
+      - condition: state
+        entity_id: input_boolean.zendure_reserve_atteinte
+        state: "off"
+    actions:
+      - action: select.select_option
+        target:
+          entity_id: select.zendure_manager_operation
+        data:
+          option: smart_fondation
+    mode: single
+
+  # -------------------------------------------------------------------------
+  - id: zendure_reserve_coupure
+    alias: Zendure - couper le moteur quand la reserve du matin est atteinte
+    description: >
+      Chaque minute pendant les HC, DES la premiere minute. Si le stock est bas,
+      la coupure tombe tot, eventuellement avant minuit ; si le stock est haut,
+      elle ne tombe jamais.
+
+      Une version precedente attendait 30 min de HC, le temps que la fenetre
+      glissante se recale sur la nuit. Supprime, pour deux raisons :
+        1. la mesure ne le justifie pas - la soiree 20:06-21:36 donne 538 W de
+           mediane contre 519 W en pleine nuit, soit +3 %, et dans le sens
+           prudent (on reserve un peu trop, jamais trop peu) ;
+        2. elle coutait 262 Wh preleves sur la reserve quand le stock est deja
+           bas a l'entree en HC et que le cumulus ne chauffe pas : la coupure
+           tombait a 22:06 au lieu de 21:36, soit 30 min de decharge en trop.
+      Quand le cumulus chauffe des 21:36, en revanche, elle ne coutait rien :
+      le moteur est deja coupe par l'automatisation d'entree en HC.
+
+      Si HA vient de demarrer et que la moyenne glissante est vide,
+      `zendure_conso_nuit_retenue` bascule sur son repli - la decision reste
+      possible, jamais bloquee.
+    triggers:
+      - trigger: time_pattern
+        minutes: "*"
+    conditions:
+      - condition: state
+        entity_id: input_boolean.zendure_reserve_matin_active
+        state: "on"
+      - condition: state
+        entity_id: binary_sensor.linky_02330101298371_heures_creuses_actives
+        state: "on"
+      - condition: state
+        entity_id: input_boolean.zendure_reserve_atteinte
+        state: "off"
+      - condition: template
+        value_template: "{{ states('sensor.zendure_reserve_matin') | float(0) > 0 }}"
+      - condition: template
+        value_template: "{{ states('sensor.zendure_energie_disponible_wh') | float(99999) <= states('sensor.zendure_reserve_matin') | float(0) }}"
+    actions:
+      - action: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.zendure_reserve_atteinte
+      - action: select.select_option
+        target:
+          entity_id: select.zendure_manager_operation
+        data:
+          option: "off"
+      - action: persistent_notification.create
+        data:
+          title: Zendure - reserve du matin
+          message: >
+            Moteur coupe a {{ now().strftime('%H:%M') }}.
+            Reserve gardee {{ states('sensor.zendure_reserve_matin') }} Wh pour
+            tenir jusqu'a {{ states('sensor.zendure_heure_solaire_suffisant') }}
+            (conso retenue {{ states('sensor.zendure_conso_nuit_retenue') }} W,
+            source : {{ state_attr('sensor.zendure_conso_nuit_retenue','source') }}).
+    mode: single
+
+  # -------------------------------------------------------------------------
+  - id: zendure_reserve_liberation
+    alias: Zendure - relacher la coupure si la reserve redevient large
+    description: >
+      Le verrou n'est pas a sens unique : le moteur peut repartir avant 05:36 si
+      le stock le permet de nouveau. La reserve DIMINUE quand Solcast avance
+      l'heure de solaire suffisant, ou quand la conso mesuree baisse.
+      Deux garde-fous contre le battement, meme lecon que la 1.4.4.6 cote
+      moteur : une marge en % au lieu du seuil nu, et 15 min minimum entre deux
+      bascules.
+    triggers:
+      - trigger: time_pattern
+        minutes: "*"
+    conditions:
+      - condition: state
+        entity_id: input_boolean.zendure_reserve_matin_active
+        state: "on"
+      - condition: state
+        entity_id: binary_sensor.linky_02330101298371_heures_creuses_actives
+        state: "on"
+      - condition: state
+        entity_id: input_boolean.zendure_reserve_atteinte
+        state: "on"
+        for: "00:15:00"
+      - condition: numeric_state
+        entity_id: sensor.cave_cumulus_puissance
+        below: 200
+      - condition: template
+        value_template: >
+          {% set marge = 1 + states('input_number.zendure_marge_reprise') | float(15) / 100 %}
+          {{ states('sensor.zendure_energie_disponible_wh') | float(0)
+             > states('sensor.zendure_reserve_matin') | float(99999) * marge }}
+    actions:
+      - action: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.zendure_reserve_atteinte
+      - action: select.select_option
+        target:
+          entity_id: select.zendure_manager_operation
+        data:
+          option: smart_fondation
+    mode: single
+
+  # -------------------------------------------------------------------------
+  - id: zendure_reserve_reprise_hp
+    alias: Zendure - reprendre le moteur au passage en HP
+    description: >
+      Declenche sur le capteur Linky et non sur une heure en dur : si le
+      distributeur decale les plages, l'automatisation suit.
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.linky_02330101298371_heures_creuses_actives
+        from: "on"
+        to: "off"
+    conditions:
+      - condition: state
+        entity_id: input_boolean.zendure_reserve_matin_active
+        state: "on"
+    actions:
+      - action: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.zendure_reserve_atteinte
+      - action: select.select_option
+        target:
+          entity_id: select.zendure_manager_operation
+        data:
+          option: smart_fondation
+    mode: single
