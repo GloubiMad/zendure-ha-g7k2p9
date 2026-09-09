@@ -1148,21 +1148,57 @@ class FondationEngine:
                 forced += max(0.0, self.pv_ema[d.deviceId] - ovh)
         t_raw = hl_raw - forced
 
+        db_on = self.db_on.asNumber
+        db_off = self.db_off.asNumber
+        ft = self.fast_track.asNumber
+
+        # --- COMMANDE EN VOL — calculee ICI depuis la 1.4.4.7 -------------------------------
+        # Elle etait calculee 100 lignes plus bas, juste pour l'integrale. Or `amt` en a besoin
+        # AUSSI, et il est forme juste en dessous : le calcul remonte donc avant le split-EMA.
+        # Rien d'autre ne change ; `house_net`, `db_on` et `now` sont tous disponibles ici.
+        inflight = sum(float(self.cmd_applied.get(d.deviceId, 0)) for d in devices) - house_net
+        if abs(inflight) > db_on:
+            if self.inflight_since is None:
+                self.inflight_since = now
+        else:
+            self.inflight_since = None
+        wg = self.wake_grace.asNumber
+        en_vol = wg > 0 and self.inflight_since is not None and (now - self.inflight_since).total_seconds() < wg
+        self.inflight, self.en_vol = inflight, en_vol
+
         # --- split-EMA : le régime décide sur le LISSÉ, les montants sur le BRUT ---
         alpha = max(0.05, min(1.0, self.hl_alpha.asNumber / 100.0))
         self.hl_ema = t_raw if self.hl_ema is None else alpha * t_raw + (1.0 - alpha) * self.hl_ema
         t_reg = self.hl_ema
-        db_on = self.db_on.asNumber
-        db_off = self.db_off.asNumber
-        ft = self.fast_track.asNumber
 
         # --- lissage des MONTANTS, avec BYPASS fast-track ---
         # Le régime décide sur hl_ema, les montants sur t_amt. Au-delà de ±ft (vrai gros saut
         # d'énergie), on recale le filtre sur le brut et on l'utilise tel quel : un gros saut passe
         # INTACT et immédiatement, seul le bruit est filtré. C'est la différence avec le slew-rate,
         # qui lui écrête aussi les vrais sauts.
+        #
+        # ⛔ 1.4.4.7 — LE FAST-TRACK NE S'ARME PLUS SUR UN SAUT QUE NOUS AVONS FABRIQUE.
+        # Le bypass existe pour un VRAI gros appel de puissance (four, plaque). Mais
+        # `house_load = P1 + Σhome` melange un P1 frais et des `home` en retard : a chaque
+        # changement de consigne il se trompe de l'amplitude de ce changement — et ce faux pic
+        # franchit `ft`, donc supprime le lissage EXACTEMENT quand il faudrait qu'il agisse.
+        #
+        # MESURE du 09/09/2026, 15 min, `up` seul en charge (~360 mises a jour) :
+        #   · `hl` oscille de -79 a 1555 W, ecart-type 309 W, alors que la conso est stable ;
+        #   · fast-track arme 78 % des cycles, dont 43 % AVEC de la commande en vol ;
+        #   · |hl| median lors de ces armements : 1140 W, pour ~900 W de conso reelle ;
+        #   · resultat : setpoint d'ecart-type 261 W, consigne de `up` sautant de 276 W en
+        #     mediane (135 sauts de plus de 300 W en 15 min) — le yo-yo constate.
+        #
+        # La 1.4.4.5 gelait deja l'integrale dans ce cas : elle tient (integrale bornee entre
+        # -554 et +143 sur la meme fenetre). Mais `sp = max(0, amt) + integrale` a DEUX termes,
+        # et un seul etait protege. Meme cause, meme condition, second consommateur — c'est
+        # la forme habituelle des bugs de ce fichier, une decision appliquee a un seul endroit.
+        #
+        # Le lissage reprend simplement la main : un vrai saut de conso, lui, n'a pas de
+        # commande en vol en face, donc il passe toujours INTACT.
         a_amt = max(0.05, min(1.0, self.amt_alpha.asNumber / 100.0))
-        if a_amt >= 1.0 or abs(t_raw) > ft:
+        if a_amt >= 1.0 or (abs(t_raw) > ft and not en_vol):
             self.amt_ema = t_raw
         else:
             self.amt_ema = t_raw if self.amt_ema is None else a_amt * t_raw + (1.0 - a_amt) * self.amt_ema
@@ -1256,15 +1292,7 @@ class FondationEngine:
         # n'obéit jamais gèlerait la correction d'un import pour toujours. Les 12 épisodes mesurés
         # durent 6,8 s en médiane et 12,6 s au maximum — la borne à 15 s ne coupe aucun cas légitime.
         # `wake_grace` = 0 -> `en_vol` toujours faux = comportement d'avant la 1.4.4.5, exactement.
-        inflight = sum(float(self.cmd_applied.get(d.deviceId, 0)) for d in devices) - house_net
-        if abs(inflight) > db_on:
-            if self.inflight_since is None:
-                self.inflight_since = now
-        else:
-            self.inflight_since = None
-        wg = self.wake_grace.asNumber
-        en_vol = wg > 0 and self.inflight_since is not None and (now - self.inflight_since).total_seconds() < wg
-        self.inflight, self.en_vol = inflight, en_vol
+        # (calcul remonte avant le split-EMA en 1.4.4.7 : `amt` en a besoin AUSSI)
         # ÉCRÊTAGE PERMANENT — et pas seulement au moment d'accumuler (trou de la 1.4.3.36).
         # `sat_dis` empêche l'intégrale de MONTER quand plus rien n'est mobilisable, mais il ne la
         # fait pas DESCENDRE : avec `imax` = 0, la vidange `max(imin, min(-p1, imax))` vaut 0 et la
