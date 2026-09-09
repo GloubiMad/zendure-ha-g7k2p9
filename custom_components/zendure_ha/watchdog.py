@@ -65,6 +65,18 @@ WD_OFF_RETRY = 30      # s entre deux réémissions ; l'appareil accuse en 184 m
 WD_OFF_TOL = 20        # W ; en dessous on considère l'appareil arrêté (bruit de mesure)
 WD_OFF_ALERT = 10      # tentatives avant de prévenir : ~5 min sans obtenir l'arrêt
 
+# --- 1.4.5.0 — DÉMARRAGE À FROID : UN APPAREIL JAMAIS VU N'EST PAS UN APPAREIL SAIN -----------
+# `lastreport == datetime.min` signifie « aucun `properties/report` depuis le chargement de
+# l'intégration ». Le watchdog faisait `continue` : aucune escalade, aucun sondage, jamais.
+# Or c'est PRÉCISÉMENT le cas le plus grave. Le 09/09/2026 : `up` est muet depuis 545 s, HA
+# recharge l'intégration à 21:54:57, `lastreport` repart à `datetime.min` — et l'appareil sort
+# du champ de vision du watchdog pour de bon. SoC et température restent `unknown`, personne
+# ne tente rien.
+# Le raisonnement d'origine (« jamais vu = pas encore initialisé, ne rien faire ») ne vaut que
+# pendant les premières secondes. Passé ce délai, l'absence de rapport EST l'anomalie.
+WD_COLD = 60           # s après la première vue d'un device avant de s'inquiéter de son silence
+WD_COLD_RETRY = 45     # s entre deux sondages d'un device jamais vu
+
 
 @dataclass
 class _WdState:
@@ -81,6 +93,10 @@ class _WdState:
     off_last: datetime | None = None
     off_tries: int = 0
     off_alerted: bool = False
+    # 1.4.5.0 — device jamais vu depuis le chargement
+    first_tick: datetime | None = None
+    cold_last: datetime | None = None
+    cold_tries: int = 0
 
 
 class MqttWatchdog:
@@ -148,7 +164,38 @@ class MqttWatchdog:
                     st.probe_at = None
                     st.probe_kind = ""
                     self._set(d, "stalled", 0)
+
+                # --- 1.4.5.0 — ON NE L'ABANDONNE PLUS ICI -------------------------------------
+                # Avant : `continue` sec. Un appareil absent au moment d'un rechargement de
+                # l'intégration n'était plus jamais sondé — il disparaissait du watchdog, ses
+                # entités restaient `unknown`, et rien ne le signalait.
+                # Maintenant : passé `WD_COLD` après sa première apparition dans la boucle, on
+                # le sonde comme n'importe quel muet. Le getAll est une LECTURE, sans effet sur
+                # un appareil sain ; l'envoyer aux DEUX brokers couvre le cas où l'appareil a
+                # basculé côté cloud alors que le sélecteur dit local (constaté sur `up`).
+                if st.first_tick is None:
+                    st.first_tick = now
+                if (now - st.first_tick).total_seconds() < WD_COLD:
+                    continue
+                if st.cold_last is not None and (now - st.cold_last).total_seconds() < WD_COLD_RETRY:
+                    continue
+                st.cold_last = now
+                st.cold_tries += 1
+                self._set(d, "silence", int((now - st.first_tick).total_seconds()))
+                self._set(d, "stalled", 1)
+                _LOGGER.warning(
+                    "Watchdog %s: AUCUN rapport depuis le chargement (%d s) — sondage %d",
+                    d.name, int((now - st.first_tick).total_seconds()), st.cold_tries,
+                )
+                self.manager.hass.async_create_task(self.wake(d, 1))
                 continue
+
+            if st.first_tick is not None:  # 1.4.5.0 : il a fini par parler, on repart propre
+                if st.cold_tries:
+                    _LOGGER.warning("Watchdog %s: premier rapport obtenu après %d sondage(s)", d.name, st.cold_tries)
+                st.first_tick = None
+                st.cold_last = None
+                st.cold_tries = 0
 
             stale = int((now - (d.lastreport - timedelta(minutes=5))).total_seconds())
             self._set(d, "silence", stale if stale > t_getall else 0)
