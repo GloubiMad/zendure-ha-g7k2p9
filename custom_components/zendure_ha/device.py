@@ -151,6 +151,9 @@ class ZendureDevice(EntityDevice):
         self.fuseGrp: FuseGroup
 
         self.mqtt: mqtt_client.Client | None = None
+        # 1.4.4.8 : envois MQTT perdus. `publish_broken` evite de journaliser a chaque cycle.
+        self.publish_failed: int = 0
+        self.publish_broken: bool = False
         self.zendure: mqtt_client.Client | None = None
         self.ipAddress = definition.get("ip", "") if definition.get("ip", "") != "" else f"zendure-{definition['productModel'].replace(' ', '')}-{self.snNumber}.local"
         # ⛔ 1.4.3.53 — L'ADRESSE PEUT CHANGER, ET RIEN NE LE REMARQUAIT.
@@ -401,23 +404,82 @@ class ZendureDevice(EntityDevice):
     async def button_press(self, _key: str) -> None:
         return
 
-    def mqttPublish(self, topic: str, command: Any, client: mqtt_client.Client | None = None) -> None:
+    def mqttPublish(self, topic: str, command: Any, client: mqtt_client.Client | None = None) -> bool:
+        """Publie une commande, et DIT si elle n'est pas partie.
+
+        ⛔ 1.4.4.8 — AVANT, LE CODE RETOUR ÉTAIT JETÉ. Le corps tenait en quatre lignes :
+        `client.publish(...)` sans lire ce que paho renvoyait, et — pire — si les DEUX clients
+        étaient `None`, la fonction ne publiait rien et n'en disait pas un mot. Un ordre pouvait
+        donc être perdu en silence, et tout le reste du code continuait comme s'il était passé.
+
+        Ce n'est pas théorique. Le 09/09/2026 à 21:36, le moteur passe en `off` et appelle
+        `power_off()` sur les trois appareils. `up` était muet depuis 545 s : son message est parti
+        dans le vide, personne ne l'a su, et il a continué à décharger 855 W sur sa dernière
+        consigne. Mesuré sur 127 h, `up` est injoignable 1,9 % du temps (23 épisodes, jusqu'à
+        28 min d'affilée) — autant d'occasions de perdre un ordre sans trace.
+
+        `paho.publish()` renvoie un `MQTTMessageInfo` dont `rc` vaut `MQTT_ERR_SUCCESS` (0) quand le
+        message est accepté, et `MQTT_ERR_NO_CONN` (4) quand le client n'est pas connecté. Le lire
+        coûte une comparaison ; ne pas le lire coûte des kWh invisibles.
+
+        ⚠️ CE QUE CE RETOUR PROUVE, ET CE QU'IL NE PROUVE PAS. `rc == 0` dit que le message a été
+        remis à la file du client, pas que l'appareil l'a exécuté ni même que le broker l'a reçu.
+        C'est une condition NÉCESSAIRE, pas suffisante — la confirmation, elle, reste le
+        `properties/report` qui suit. Ne pas retomber dans le travers inverse en croyant qu'un
+        `True` ici garantit l'exécution.
+
+        JOURNALISATION SUR TRANSITION, jamais à chaque cycle : un broker coupé produirait sinon des
+        centaines de lignes par minute — l'user a déjà des logs de plusieurs centaines de Mo. On
+        journalise le passage marche→panne et panne→marche, et le compteur `publish_failed` porte
+        le reste.
+        """
         command["messageId"] = self._messageid
         command["deviceId"] = self.deviceId
         command["timestamp"] = int(datetime.now().timestamp())
         payload = json.dumps(command, default=lambda o: o.__dict__)
 
-        if client is not None:
-            client.publish(topic, payload)
-        elif self.mqtt is not None:
-            self.mqtt.publish(topic, payload)
+        target = client if client is not None else self.mqtt
+        if target is None:
+            self._publish_fail(topic, "aucun client MQTT disponible")
+            return False
 
-    def mqttInvoke(self, command: Any) -> None:
+        try:
+            info = target.publish(topic, payload)
+        except Exception as err:  # noqa: BLE001
+            self._publish_fail(topic, f"exception {type(err).__name__}: {err}")
+            return False
+
+        rc = getattr(info, "rc", 0)
+        if rc != 0:
+            self._publish_fail(topic, f"refus du client, rc={rc}" + (" (pas de connexion)" if rc == 4 else ""))
+            return False
+
+        if self.publish_broken:
+            _LOGGER.warning("%s : publication MQTT rétablie après %s échec(s)", self.name, self.publish_failed)
+            self.publish_broken = False
+        return True
+
+    def _publish_fail(self, topic: str, raison: str) -> None:
+        """Comptabilise un envoi perdu, et le journalise UNE fois par épisode."""
+        self.publish_failed += 1
+        if not self.publish_broken:
+            self.publish_broken = True
+            _LOGGER.warning(
+                "%s : commande MQTT PERDUE sur %s — %s. L'appareil garde sa consigne précédente.",
+                self.name, topic, raison,
+            )
+
+    def mqttInvoke(self, command: Any) -> bool:
+        """Envoie une commande `function/invoke`. Retourne False si elle n'est pas partie.
+
+        1.4.4.8 : le retour est propagé jusqu'ici pour que les appelants — `power_off` en tête —
+        puissent savoir que leur ordre n'a pas quitté la machine.
+        """
         self._messageid += 1
         command["messageId"] = self._messageid
         command["deviceKey"] = self.deviceId
         command["timestamp"] = int(datetime.now().timestamp())
-        self.mqttPublish(self.topic_function, command)
+        return self.mqttPublish(self.topic_function, command)
 
     async def mqttProperties(self, payload: Any) -> None:
         # Un `properties/report` prouve les DEUX : la liaison répond ET l'état est rapporté.

@@ -1942,11 +1942,18 @@ class FondationEngine:
         # `cyc` a un cycle de retard (mesuré après le retour de update). Tous en ms, arrondis.
         ms_io = (perf_counter() - t_io) * 1000.0
         ms = f" ms={getattr(self.manager, 'ms_cycle', 0.0):.0f}cyc/{self._ms_calc:.1f}calc/{ms_io:.1f}io"
+        # 1.4.4.8 — ENVOIS MQTT PERDUS, calcule ici et non dans le f-string : le message est une
+        # concatenation implicite de f-strings, on n'y insere pas une expression conditionnelle.
+        perdus = [(i, d) for i, d in enumerate(devices) if getattr(d, "publish_failed", 0) > 0]
+        pub = " pub=" + "/".join(f"{self._tag(i, d)}:{d.publish_failed}" for i, d in perdus) if perdus else ""
         self.debug = (
             f"fondation regime={self.regime.name} hl={int(hl_raw)} forced={int(forced)} T={int(t_raw)}"
             f" ema={int(t_reg)} amt={int(self.amt_ema) if self.amt_ema is not None else 0}"
             f" int={int(self.integral)} sp={setpoint} occ={self.occ:.2f}"
             f" vol={int(self.inflight)}{'*' if self.en_vol else ''}"
+            # 1.4.4.8 : envois MQTT perdus, par appareil. `pub` n'apparait QUE s'il y en a - meme
+            # regle que `cap` plus bas : a 480 000 lignes/jour on n'ajoute pas un champ vide.
+            f"{pub}"
             # ⚠️ CHAQUE VALEUR EST PRÉFIXÉE DU DEVICE (28/07). Ces trois champs ne listaient que les
             # devices DÉJÀ mesurés : 1 ou 2 valeurs pour 3 appareils, sans moyen de savoir à qui
             # elles appartenaient. Un contrôle qui indexait par position sortait de FAUSSES
