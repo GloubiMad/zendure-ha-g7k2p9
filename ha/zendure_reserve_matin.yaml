@@ -139,20 +139,31 @@ template:
       # --- conso maison HORS chauffe cumulus ------------------------------
       # Le cumulus fausse tout : 2294 W de moyenne la nuit du 05/09 (il
       # chauffait) contre ~530 W les autres nuits, soit un facteur 4,3.
-      # On renvoie `unavailable` pendant la chauffe : le capteur `statistics`
+      # On rend le capteur INDISPONIBLE pendant la chauffe : le capteur `statistics`
       # plus bas ecarte alors l'echantillon au lieu de l'integrer.
       #
       # Reste valide moteur coupe : house_load = P1 + somme(sorties Zendure).
       # Moteur a l'arret, les sorties valent 0 et house_load se confond avec P1,
       # donc avec la conso de la maison. La mesure ne depend pas de la decision.
+      #
+      # /!\ CORRIGE LE 10/09 - C'EST `availability:` QUI REND UN CAPTEUR INDISPONIBLE,
+      # PAS UN `state:` QUI RENVOIE LA CHAINE "unavailable".
+      # Premiere version : `{% if ... %}unavailable{% else %}...`. HA ne l'interprete pas
+      # comme une indisponibilite : avec `device_class: power` il attend un NOMBRE, rejette
+      # la valeur et journalise
+      #     Received invalid sensor state: unavailable ... expected a number
+      # (11 occurrences en 7 min en production). La cle `availability` existe exactement
+      # pour ca : quand elle rend `false`, l'entite passe proprement a `unavailable` et le
+      # `statistics` ignore l'echantillon - ce qui etait le but depuis le debut.
       - name: Zendure house load hors cumulus
         unique_id: zendure_house_load_hors_cumulus
         unit_of_measurement: W
         device_class: power
+        availability: >
+          {{ states('sensor.zendure_manager_fondation_house_load') | is_number
+             and states('sensor.cave_cumulus_puissance') | float(0) <= 200 }}
         state: >
-          {% set hl = states('sensor.zendure_manager_fondation_house_load') | float(-1) %}
-          {% set cu = states('sensor.cave_cumulus_puissance') | float(0) %}
-          {% if hl < 0 or cu > 200 %}unavailable{% else %}{{ hl | round(0) }}{% endif %}
+          {{ states('sensor.zendure_manager_fondation_house_load') | float(0) | round(0) }}
 
       # --- conso nocturne RETENUE ------------------------------------------
       # Point unique de verite : tout le reste du package lit CE capteur.

@@ -96,6 +96,13 @@ de repli. L'attribut `source` dit laquelle a servi.
 > en `0.0` — la réserve vaudrait 0, la condition `dispo ≤ réserve` serait toujours fausse, et
 > le moteur ne serait **jamais** coupé. C'est le premier défaut trouvé sur ce package.
 
+> ⚠️ **Un `state:` qui renvoie la chaîne `"unavailable"` ne rend pas le capteur indisponible.**
+> Avec une `unit_of_measurement` ou un `device_class`, HA attend un nombre, rejette la valeur
+> et journalise `Received invalid sensor state: unavailable ... expected a number` — 11 fois
+> en 7 minutes en production. La clé dédiée est **`availability:`** : quand elle rend `false`,
+> l'entité passe proprement à `unavailable` et le capteur `statistics` écarte l'échantillon,
+> ce qui était le but. Corrigé le 10/09 sur `zendure_house_load_hors_cumulus`.
+
 ---
 
 ## Les réglages
