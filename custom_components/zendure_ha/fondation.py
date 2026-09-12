@@ -1559,10 +1559,28 @@ class FondationEngine:
                         for d in devices
                         if not self._has_pv(d) and d.state != DeviceState.SOCFULL and not self._bypass_blocks(d) and d.electricLevel.asInt < 100
                     ]
+                    # ⛔ 1.4.5.1 — CE TRI IGNORAIT L'HYSTÉRÉSIS, contrairement à son JUMEAU en
+                    # branche CHARGE. Encore une décision écrite à deux endroits, appliquée à un
+                    # seul : le sticky `clead` existait depuis toujours dans la répartition de
+                    # charge, jamais ici. Or le matin le régime est DISCHARGE ~87 % du temps
+                    # (mesuré le 12/09 : 19064 cycles sur 21962), donc TOUTE la charge du parc
+                    # passe par cette étape — et la stratégie choisie par l'utilisateur n'était
+                    # jamais appliquée.
+                    #
+                    # Effet du tri sur le SoC NU, avec deux puits partis du même niveau : le
+                    # premier servi monte d'un point, repasse donc derrière l'autre, qui prend la
+                    # main, monte d'un point, et ainsi de suite. Les deux montent ENSEMBLE au lieu
+                    # qu'un seul soit rempli. Mesuré le 12/09 : **18 alternances** de puits dans la
+                    # matinée (Pro 8 épisodes, up 6, glagla 5), durée médiane 167 s, et les SoC
+                    # évoluent en parallèle — Pro 15 → 21 %, up 15 → 20 % — au lieu d'un seul à 30 %.
+                    #
+                    # `sinks` ne contient que des appareils SANS PV : le critère `_has_pv` de la
+                    # branche CHARGE est déjà satisfait par construction, seule la clé de SoC reste.
                     if self.charge_strategy.value == 2:  # fixed_order : le plus gros d'abord
                         sinks.sort(key=lambda d: -d.kWh)
-                    else:  # plus vide d'abord
-                        sinks.sort(key=lambda d: d.electricLevel.asInt)
+                    else:  # plus vide d'abord + sticky — MÊME clé que la branche CHARGE
+                        hyst = 15 if self.charge_strategy.value == 1 else self.hyst_device.asNumber
+                        sinks.sort(key=lambda d: d.electricLevel.asInt - (hyst if self.clead.get(d.deviceId) else 0))
                     fuse_chg: dict[object, float] = {}
 
                     def chg_room(d: ZendureDevice) -> float:
@@ -1684,7 +1702,13 @@ class FondationEngine:
             for d in devices:
                 ns = max(0.0, self.pv_ema[d.deviceId] - ovh)
                 self.lead[d.deviceId] = (cmd[d] - ns) > 5
-                self.clead[d.deviceId] = False
+                # ⛔ 1.4.5.1 — ÉTAIT FORCÉ À `False`, ce qui rendait tout sticky de charge
+                # inopérant en régime DISCHARGE. Or l'étape 1bis ci-dessus DONNE des consignes de
+                # charge dans ce régime (routage du surplus solaire vers les puits sans PV) : un
+                # appareil qui charge y est bel et bien un leader de charge, et doit le rester d'un
+                # cycle à l'autre. Sans cette ligne, `clead` valant toujours False, le tri corrigé
+                # plus haut retomberait sur le SoC nu et l'alternance reprendrait à l'identique.
+                self.clead[d.deviceId] = cmd[d] < -5
         elif self.regime == ManagerState.CHARGE:
             # Une intégrale négative RÉDUIT la charge, elle ne doit jamais l'INVERSER en décharge :
             # `rem` est un montant de charge, un `rem` négatif ferait `cmd[d] -= rem` donc sortir.
