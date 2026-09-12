@@ -1737,16 +1737,25 @@ class FondationEngine:
                     cmd[d] += take
                     demand -= take
                     fuse_used[d.fuseGrp] = fuse_used.get(d.fuseGrp, 0.0) + take
-            for d in devices:
-                ns = max(0.0, self.pv_ema[d.deviceId] - ovh)
-                self.lead[d.deviceId] = (cmd[d] - ns) > 5
-                # ⛔ 1.4.5.1 — ÉTAIT FORCÉ À `False`, ce qui rendait tout sticky de charge
-                # inopérant en régime DISCHARGE. Or l'étape 1bis ci-dessus DONNE des consignes de
-                # charge dans ce régime (routage du surplus solaire vers les puits sans PV) : un
-                # appareil qui charge y est bel et bien un leader de charge, et doit le rester d'un
-                # cycle à l'autre. Sans cette ligne, `clead` valant toujours False, le tri corrigé
-                # plus haut retomberait sur le SoC nu et l'alternance reprendrait à l'identique.
-                self.clead[d.deviceId] = cmd[d] < -5
+            # ⛔ 1.4.5.4 — UN SEUL LEADER, PAS « TOUS CEUX QUI BOUGENT ».
+            # `lead`/`clead` valaient « cet appareil a reçu une part », donc DÈS QUE DEUX
+            # appareils sont servis au même cycle — ce qui arrive à chaque fois que le montant
+            # dépasse la capacité du premier — ils deviennent TOUS DEUX leaders. Le bonus
+            # d'hystérésis s'applique alors des deux côtés, s'annule, et le tri retombe sur le
+            # SoC NU : les deux se suivent à un point près au lieu qu'un seul soit rempli.
+            #
+            # MESURÉ le 12/09 : `up` et `mrbig` progressent ensemble à 2 points d'écart, loin
+            # des 15 attendus. Sur les 397 cycles où `mrbig` charge alors que `up` est plus vide,
+            # l'écart médian de SoC est de 1 POINT — le sticky ne mordait plus du tout. Et 70
+            # cycles de charge simultanée suffisent à marquer les deux appareils.
+            #
+            # Le leader est donc celui qui a été servi EN TÊTE du tri, et lui seul. Les suivants
+            # ne reçoivent que le débordement : ce n'est pas un choix de stratégie, c'est une
+            # conséquence de la capacité, et ça ne doit pas leur donner de priorité pour la suite.
+            # 1.4.5.1 : `clead` doit être entretenu ICI aussi — l'étape 1bis donne des consignes
+            # de charge en régime DISCHARGE (routage du surplus vers les puits sans PV), donc un
+            # appareil qui y charge est bel et bien un leader de charge.
+            self._maj_lead(devices, cmd, ovh)
         elif self.regime == ManagerState.CHARGE:
             # Une intégrale négative RÉDUIT la charge, elle ne doit jamais l'INVERSER en décharge :
             # `rem` est un montant de charge, un `rem` négatif ferait `cmd[d] -= rem` donc sortir.
@@ -1876,15 +1885,50 @@ class FondationEngine:
                         extra = min(r, cap)
                         cmd[d] += extra
                         r -= extra
-            for d in devices:
-                self.lead[d.deviceId] = False
-                self.clead[d.deviceId] = cmd[d] < -5
+            self._maj_lead(devices, cmd, ovh)
         else:
-            for d in devices:
-                self.lead[d.deviceId] = False
-                self.clead[d.deviceId] = False
+            # IDLE — ON NE TOUCHE À RIEN (1.4.5.4). Cf. `_maj_lead`.
+            pass
 
         await self._apply_and_report(devices, cmd, hl_raw, forced, t_raw, t_reg, p1)
+
+    def _maj_lead(self, devices: list[ZendureDevice], cmd: dict[ZendureDevice, float], ovh: float) -> None:
+        """Met à jour les hystérésis sticky `lead` (décharge) et `clead` (charge).
+
+        ⛔ 1.4.5.4 — DEUX DÉFAUTS CORRIGÉS ENSEMBLE, parce qu'ils se masquaient l'un l'autre.
+
+        1) UN SEUL LEADER, PAS « TOUS CEUX QUI BOUGENT ».
+        `lead`/`clead` valaient « cet appareil a reçu une part ». Dès que DEUX appareils sont
+        servis au même cycle — ce qui arrive chaque fois que le montant dépasse la capacité du
+        premier — ils devenaient TOUS DEUX leaders. Le bonus d'hystérésis s'appliquait alors des
+        deux côtés, s'annulait, et le tri retombait sur le SoC NU.
+        Le leader est celui qui a reçu LA PLUS GROSSE part, et lui seul : les suivants ne
+        reçoivent que le débordement, conséquence d'une limite de plaque et non d'un choix de
+        stratégie — ça ne doit pas leur donner de priorité pour la suite.
+
+        2) UN SENS NE DOIT PAS EFFACER L'AUTRE, ET L'IDLE NE DOIT RIEN EFFACER DU TOUT.
+        Avant, la branche CHARGE forçait `lead = False`, la branche DISCHARGE forçait
+        `clead = False`, et l'IDLE remettait les DEUX à False pour tout le monde. Or le régime
+        oscille en permanence : MESURÉ le 12/09, **82 transitions de régime en 52 minutes, dont
+        41 entrées en IDLE — une toutes les 38 secondes**. Le sticky était donc effacé avant
+        d'avoir jamais pu s'établir, alors qu'il lui faut des HEURES pour creuser les 15 points
+        d'écart de `hysteresis_wide`. Résultat constaté : `up` et `mrbig` progressaient ensemble
+        à 2 points d'écart au lieu de 15, et sur les 397 cycles où `mrbig` chargeait pendant que
+        `up` était plus vide, l'écart médian de SoC valait 1 POINT.
+
+        ⇒ Un sticky ne se met à jour QUE s'il y a eu une décision dans son sens à ce cycle.
+        Sinon il est laissé INTACT — c'est toute sa raison d'être : se souvenir de qui menait.
+        """
+        dis = [d for d in devices if (cmd[d] - max(0.0, self.pv_ema[d.deviceId] - ovh)) > 5]
+        chg = [d for d in devices if cmd[d] < -5]
+        if dis:
+            meneur = max(dis, key=lambda d: cmd[d] - max(0.0, self.pv_ema[d.deviceId] - ovh))
+            for d in devices:
+                self.lead[d.deviceId] = d is meneur
+        if chg:
+            meneur = min(chg, key=lambda d: cmd[d])
+            for d in devices:
+                self.clead[d.deviceId] = d is meneur
 
     async def _apply_and_report(self, devices, cmd, hl_raw, forced, t_raw, t_reg, p1) -> None:
         # Fin du CALCUL, début de la préparation + I/O (envoi des consignes plus bas).
@@ -2272,7 +2316,9 @@ class FondationEngine:
                 cmd[d] += take
                 deficit -= take
                 fuse_used[d.fuseGrp] = used + take
-        for d in devices:
-            self.lead[d.deviceId] = False
-            self.clead[d.deviceId] = cmd[d] < -5
+        # 1.4.5.4 : MÊME règle que le moteur principal. `_direct_control` est un second moteur,
+        # désactivé par défaut (`direct` = 0), et c'est précisément parce qu'il diverge en silence
+        # qu'il a accumulé tous les bugs de juillet. On l'aligne donc ici aussi, même si le chemin
+        # est aujourd'hui inactif — une divergence laissée en place est une régression en attente.
+        self._maj_lead(devices, cmd, ovh)
         return forced, base, base
