@@ -262,6 +262,10 @@ class FondationEngine:
         self.inflight_since: datetime | None = None  # 1.4.4.5 : début de l'épisode « consigne en vol »
         # 1.4.4.6 : par device, (début du besoin d'engagement, dernière fois qu'il a été constaté)
         self.engage_since: dict[str, tuple[datetime, datetime]] = {}
+        # 1.4.5.3 — SONDE : pourquoi un appareil n'a-t-il pas reçu de part ? Rempli à chaque
+        # cycle par `_engage_ok` et par la répartition, lu seulement par le message de debug.
+        self.engage_why: dict[str, str] = {}
+        self.part_why: dict[str, str] = {}
         # Exposés pour `_apply_and_report`, qui est une AUTRE fonction (même motif que `out_capped`) :
         # `_direct_control` y arrive sans passer par le calcul, d'où l'initialisation ici.
         self.inflight: float = 0.0
@@ -330,9 +334,12 @@ class FondationEngine:
         # puis seuil avec hystérésis) : elle est seulement mise en facteur pour que le dwell ci-dessous
         # s'applique aux DEUX chemins. Un sondage de 3 s ne sonde rien — mesuré à 0 % de rendement.
         if not ((not acc and take >= probe) or take >= (me / 2 if running else me)):
+            # 1.4.5.3 : `seuil` = la part proposée est trop petite pour réveiller l'appareil.
+            self.engage_why[d.deviceId] = f"seuil({take:.0f}<{me / 2 if running else me:.0f})"
             return False
         if running:
             self.engage_since.pop(d.deviceId, None)
+            self.engage_why.pop(d.deviceId, None)
             return True
         # --- 1.4.4.6 — DWELL D'ENGAGEMENT : un RÉVEIL doit être mérité par la DURÉE du besoin ------
         # Le seuil historique porte sur le MONTANT (« ne pas réveiller pour 86 W »). Il ne dit rien de
@@ -363,12 +370,19 @@ class FondationEngine:
         # appareil qui, lui, produira ses 94 %.
         wg = self.wake_grace.asNumber
         if wg <= 0:
+            self.engage_why.pop(d.deviceId, None)
             return True
         since, last = self.engage_since.get(d.deviceId, (now, now))
         if (now - last).total_seconds() > ENGAGE_GAP:
             since = now                      # le besoin avait disparu : on repart de zéro
         self.engage_since[d.deviceId] = (since, now)
-        return (now - since).total_seconds() >= wg
+        attente = (now - since).total_seconds()
+        if attente < wg:
+            # 1.4.5.3 : `dwell` = le besoin est légitime mais n'a pas encore assez duré.
+            self.engage_why[d.deviceId] = f"dwell({attente:.0f}/{wg:.0f}s)"
+            return False
+        self.engage_why.pop(d.deviceId, None)
+        return True
 
     @staticmethod
     def _tag(i: int, d: ZendureDevice) -> str:
@@ -1692,10 +1706,34 @@ class FondationEngine:
                 else:            # hysteresis / hysteresis_wide : plus-plein-d'abord + sticky
                     hyst = 15 if dstrat == 1 else self.hyst_device.asNumber
                     batt.sort(key=lambda d: d.electricLevel.asInt + (hyst if self.lead.get(d.deviceId) else 0), reverse=True)
-                for d in batt:
+                # --- 1.4.5.3 — SONDE : POURQUOI UN APPAREIL N'A-T-IL PAS REÇU DE PART ? -------
+                # Question restée sans réponse après trois versions : sur 28 % des inversions de
+                # tri mesurées, l'appareil laissé au repos était présent dans la liste, connecté
+                # (`Conn=11`), en état `INACT`, avec un livrable intact (1201 W médian) — et il
+                # n'était quand même pas servi. Rien dans le fichier ne permettait de le savoir :
+                # la boucle `continue` sans laisser de trace, et l'absence de part ressemble à
+                # toutes les autres absences de part.
+                #
+                # On enregistre donc, par appareil, la raison de son absence de part :
+                #   ok=<W>   servi
+                #   dem      la demande était déjà épuisée par les précédents (cas NORMAL)
+                #   cap      `dis_cap` nul : plafond device, fusegroup ou livraison mesurée
+                #   seuil(..) part trop petite pour un réveil (`min_engage`)
+                #   dwell(..) besoin légitime mais pas encore assez durable (1.4.4.6)
+                # Le rang dans le tri est joint : il dit si l'appareil était PREMIER servi ou non,
+                # donc si l'ordre de la stratégie a été respecté.
+                self.part_why.clear()
+                for rang, d in enumerate(batt):
                     take = min(demand, dis_cap(d))
                     if not self._engage_ok(d, take, me, now):
+                        self.part_why[d.deviceId] = f"{rang}:{self.engage_why.get(d.deviceId, 'eng')}"
                         continue
+                    if take <= 0:
+                        # take nul : soit plus rien à distribuer, soit aucune capacité. Les deux
+                        # sont légitimes mais ne veulent PAS dire la même chose quand on enquête.
+                        self.part_why[d.deviceId] = f"{rang}:" + ("dem" if demand <= 0 else "cap")
+                        continue
+                    self.part_why[d.deviceId] = f"{rang}:ok{take:.0f}"
                     cmd[d] += take
                     demand -= take
                     fuse_used[d.fuseGrp] = fuse_used.get(d.fuseGrp, 0.0) + take
@@ -1970,6 +2008,27 @@ class FondationEngine:
         # concatenation implicite de f-strings, on n'y insere pas une expression conditionnelle.
         perdus = [(i, d) for i, d in enumerate(devices) if getattr(d, "publish_failed", 0) > 0]
         pub = " pub=" + "/".join(f"{self._tag(i, d)}:{d.publish_failed}" for i, d in perdus) if perdus else ""
+        # --- 1.4.5.3 — SONDE D'INVERSION DU TRI -----------------------------------------------
+        # N'apparaît QUE lorsqu'un appareil laissé au repos est PLUS PLEIN qu'un appareil servi,
+        # d'au moins l'hystérésis de la stratégie. En dessous de cet écart, le sticky explique
+        # l'ordre et il n'y a rien à voir : afficher `why` à chaque cycle noierait le signal dans
+        # 480 000 lignes par jour, exactement comme `cap` et `pub` qui suivent la même règle.
+        #
+        # Ce qu'on lit : `rang:raison` par appareil. Le RANG dit si l'ordre de la stratégie a été
+        # respecté (0 = premier du tri) ; la RAISON dit pourquoi la part n'est pas venue.
+        # Un `0:dwell(3/15s)` signifie « il était bien premier, mais il attendait » ; un
+        # `0:cap` signifie « premier, mais aucune capacité » — deux pistes très différentes.
+        why = ""
+        if self.part_why:
+            hy = 15.0 if self.discharge_strategy.value == 1 else self.hyst_device.asNumber
+            servis = [d for d in devices if cmd.get(d, 0.0) > 50]
+            repos = [d for d in devices if abs(cmd.get(d, 0.0)) <= 50]
+            if any(r.electricLevel.asInt - s.electricLevel.asInt > hy for s in servis for r in repos):
+                why = " why=" + "/".join(
+                    f"{self._tag(i, d)}:{self.part_why[d.deviceId]}"
+                    for i, d in enumerate(devices)
+                    if d.deviceId in self.part_why
+                )
         self.debug = (
             f"fondation regime={self.regime.name} hl={int(hl_raw)} forced={int(forced)} T={int(t_raw)}"
             f" ema={int(t_reg)} amt={int(self.amt_ema) if self.amt_ema is not None else 0}"
@@ -1977,7 +2036,7 @@ class FondationEngine:
             f" vol={int(self.inflight)}{'*' if self.en_vol else ''}"
             # 1.4.4.8 : envois MQTT perdus, par appareil. `pub` n'apparait QUE s'il y en a - meme
             # regle que `cap` plus bas : a 480 000 lignes/jour on n'ajoute pas un champ vide.
-            f"{pub}"
+            f"{pub}{why}"
             # ⚠️ CHAQUE VALEUR EST PRÉFIXÉE DU DEVICE (28/07). Ces trois champs ne listaient que les
             # devices DÉJÀ mesurés : 1 ou 2 valeurs pour 3 appareils, sans moyen de savoir à qui
             # elles appartenaient. Un contrôle qui indexait par position sortait de FAUSSES
