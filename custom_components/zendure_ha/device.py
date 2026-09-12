@@ -843,8 +843,36 @@ class ZendureDevice(EntityDevice):
 
     @property
     def online(self) -> bool:
-        """Check if device is online."""
-        return self.connectionStatus.asInt >= SmartMode.CONNECTED
+        """JOIGNABLE = on a reçu un message récemment. Et rien d'autre.
+
+        ⛔ 1.4.5.2 — AVANT : `connectionStatus.asInt >= SmartMode.CONNECTED` (soit ≥ 10).
+        Or `connectionStatus` n'est PAS un état de connexion : `setStatus()` y encode aussi
+        l'état de la BATTERIE et de la configuration, en les faisant passer AVANT le test de
+        liaison —
+            0  = jamais vu           (vrai : pas de liaison)
+            1  = socStatus == 1      (état de la batterie)
+            2  = hemsState actif     (configuration)
+            3  = fuseGroup == 0      (configuration)
+            10/11/12 = cloud / local / zenSDK   (vrai état de liaison)
+        Un appareil dont la batterie est pleine reçoit donc `1`, échoue au test `>= 10`, et
+        `power_get` en conclut `DeviceState.OFFLINE` — ce qui le fait RETIRER de la liste du
+        moteur par `fondation.py`. Il ne peut alors plus être déchargé, donc il reste plein,
+        donc il reste exclu : le verrou se referme sur lui-même.
+
+        MESURÉ sur 535 443 cycles (04 au 12/09/2026), device `up` :
+            Conn=11  498 213 cycles   SoC médian 16 %   âge médian   8 s   actif
+            Conn=0    10 052 cycles   SoC médian 26 %   âge médian 517 s   VRAI silence
+            Conn=1     9 058 cycles   SoC médian 83 %   âge médian   1 s   déclaré OFFLINE
+        Les 9058 cycles à `Conn=1` ont un âge d'UNE SECONDE : l'appareil venait de parler.
+        Confirmé indépendamment côté réseau — le contrôleur Omada voit les trois appareils
+        connectés 100 % du temps, sans une seule coupure Wi-Fi.
+
+        `lastseen` est le bon critère et le seul : `power_get` le remet à `datetime.min` dès
+        qu'il a expiré (l'amont le stampe à « message + 5 min »), donc `!= datetime.min`
+        signifie exactement « vu dans les cinq dernières minutes ». C'est la définition de
+        joignable, et elle ne dépend d'aucun état de batterie.
+        """
+        return self.lastseen != datetime.min
 
     @property
     def pwr_offgrid(self) -> int:
