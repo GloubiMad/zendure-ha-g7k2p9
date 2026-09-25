@@ -304,6 +304,7 @@ class MqttWatchdog:
                 "réémission de power_off (tentative %d)", d.name, debit, st.off_tries,
             )
             self.manager.hass.async_create_task(d.power_off())
+            d.cmd_forget()  # 1.4.5.5 : commande hors power_charge/discharge (cf. `cmd_forget`)
 
             # PRÉVENIR UNE FOIS, puis continuer d'essayer. Renoncer laisserait l'appareil
             # débiter sans limite ; alerter à chaque tentative noierait le journal.
@@ -383,6 +384,11 @@ class MqttWatchdog:
                 # dernière consigne nulle -> petit écart non nul (write reçu même si non réalisable)
                 _LOGGER.warning("Watchdog %s: réveil discharge %dW (dernière consigne 0)", d.name, WD_WAKE_NUDGE)
                 await d.discharge(WD_WAKE_NUDGE)
+            # 1.4.5.5 — CES DEUX ACTES CONTOURNENT `power_charge`/`power_discharge` : le miroir de
+            # consigne ne les voit pas. Sans cet oubli, le moteur pourrait ensuite redemander la
+            # valeur qu'il croit encore en place et la garde sauterait l'envoi — laissant
+            # l'appareil sur le nudge de réveil.
+            d.cmd_forget()
 
         elif stage == 3:  # toggle broker via BLE (contourne le réseau figé), en tâche de fond
             self.manager.hass.async_create_task(self._ble_toggle(d))

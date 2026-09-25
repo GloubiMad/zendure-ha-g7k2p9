@@ -69,6 +69,22 @@ CONST_TIMEOUT = ClientTimeout(total=1)
 HTTP_FAILS_SWAP = 3
 SF_COMMAND_CHAR = "0000c304-0000-1000-8000-00805f9b34fb"
 
+# ⏱️ 1.4.5.5 — RAFRAÎCHISSEMENT DE LA CONSIGNE (s). Cf. `_cmd_skip` pour le raisonnement complet.
+#
+# Le miroir `cmd_sent` évite de republier une consigne que l'appareil a déjà. Mais il ne décrit que
+# ce que NOUS avons envoyé, jamais ce que l'appareil a REÇU — la 1.4.4.8 le rappelle : un `rc == 0`
+# ne prouve pas l'exécution, et `up` est injoignable 1,9 % du temps (mesuré sur 127 h). Un ordre
+# perdu alors que la consigne reste ensuite stable ne serait donc jamais rattrapé.
+#
+# On republie donc quoi qu'il arrive passé ce délai. C'est le filet de la garde-miroir, et il
+# couvre AUSSI les commandes envoyées hors de `power_charge`/`power_discharge` qui auraient oublié
+# d'appeler `cmd_forget` (écriture manuelle d'`outputLimit` depuis l'interface, par exemple).
+#
+# 30 s = 2 publications/minute et par appareil au pire, dans le régime le plus calme (consigne
+# figée). À comparer aux ~27/min que la cadence du moteur autorise : le coût est négligeable, et
+# republier une consigne identique est un no-op côté appareil.
+CMD_REFRESH = 30.0
+
 
 class ZendureBattery(EntityDevice):
     """Zendure Battery class for devices."""
@@ -211,6 +227,11 @@ class ZendureDevice(EntityDevice):
         self.actualKwh: float = 0.0
         self.state: DeviceState = DeviceState.OFFLINE
         self.exports_bypass: bool = True
+        # 1.4.5.5 — MIROIR DE LA DERNIÈRE CONSIGNE ENVOYÉE (cf. `_cmd_skip`). Signé comme le
+        # moteur : + décharge / − charge. `None` = on ne sait pas ce que l'appareil a, donc la
+        # prochaine consigne part quoi qu'il arrive — c'est l'état sûr, et l'état initial.
+        self.cmd_sent: int | None = None
+        self.cmd_sent_at: datetime = datetime.min
 
         self.create_entities()
 
@@ -817,14 +838,79 @@ class ZendureDevice(EntityDevice):
         """Set the power output/input."""
         return 0
 
+    def cmd_forget(self) -> None:
+        """Oublie le miroir : la prochaine consigne partira quoi qu'il arrive.
+
+        À appeler par TOUT chemin qui commande l'appareil sans passer par `power_charge` /
+        `power_discharge` — le `power_off` du Manager quand on quitte le mode, les deux actes du
+        watchdog (`power_off` de réveil, nudge `discharge`, réémission d'arrêt). Sans ça le miroir
+        décrirait un état que l'appareil n'a plus, et la garde ci-dessous sauterait l'envoi qui
+        l'y ramène.
+        """
+        self.cmd_sent = None
+
+    def _cmd_skip(self, power: int) -> bool:
+        """Cette consigne est-elle DÉJÀ celle de l'appareil ? (si oui, inutile de la republier)
+
+        ⛔ 1.4.5.5 — ON COMPARAIT À LA MESURE, PAS À LA CONSIGNE. Le test était :
+
+            abs(power - self.homeOutput.asInt + self.homeInput.asInt) <= POWER_TOLERANCE
+
+        soit « la sortie MESURÉE est déjà proche de ce que je veux, donc je n'envoie rien ». Deux
+        grandeurs qui ne décrivent pas la même chose : `power` est une consigne, `homeOutput` est
+        de la télémétrie rafraîchie toutes les 3 s (médiane mesurée sur le SolarFlow). En conclure
+        que l'appareil « a déjà » la consigne suppose que sa sortie reflète son `outputLimit` —
+        ce qui est faux exactement quand ça compte.
+
+        ⚠️ LE CAS QUI CASSE : L'APPAREIL QU'ON VIENT DE RÉVEILLER. Un onduleur à l'arrêt met
+        **11,7 s** à démarrer (cf. la fiche « démarrage à froid »). Pendant ces 11,7 s il a reçu
+        `outputLimit = 800` mais `homeOutput` vaut encore 0. Si le moteur change d'avis et commande
+        0 — ce qui est fréquent, le besoin qui l'a réveillé ayant pu disparaître — alors
+        `abs(0 - 0 + 0) = 0 <= 5` : **l'ordre d'arrêt n'est jamais transmis**, et l'appareil
+        démarre sur les 800 W qu'il avait en mémoire. Le moteur, lui, a enregistré 0.
+        Le même trou existe côté charge, avec `homeInput`.
+
+        C'est le pendant du dwell d'engagement de la 1.4.4.6 : celui-ci empêche de réveiller à
+        tort, rien ne permettait de RAPPELER un réveil déjà parti. Et ça annulait en silence le
+        correctif du 20/07 (« le zéro doit partir », cf. `fondation._apply_and_report`) pour ce cas
+        précis — le commentaire y est juste, la garde en amont l'avalait.
+        ⚠️ MÉCANISME LU DANS LE CODE, pas encore retrouvé sur trace : le lien avec les épisodes
+        « l'appareil débite après avoir été coupé » reste à confirmer sur `simulation.csv`.
+
+        ⇒ On compare donc à la DERNIÈRE CONSIGNE ENVOYÉE, seule grandeur de même nature. Ce qui
+        change, cas par cas :
+            consigne 800, envoyée 800, sortie 798  -> saut      (inchangé)
+            consigne   0, envoyée 800, sortie   0  -> ENVOI     (le bug ci-dessus)
+            consigne 810, envoyée 810, sortie 600  -> saut      (dérating/tapering : l'appareil a
+                                                                 déjà l'ordre, le republier ne
+                                                                 changerait rien — trafic en moins)
+        Le troisième cas est le seul où l'on publie MOINS qu'avant, et c'est un gain : c'est la
+        situation permanente d'un SolarFlow en fin de charge ou d'un Hyper au-dessus de 62 °C.
+
+        ⚠️ CE MIROIR NE PROUVE PAS LA RÉCEPTION. Il dit ce qu'on a envoyé, pas ce que l'appareil a
+        reçu — même mise en garde qu'en 1.4.4.8 sur le `rc` de paho. D'où `CMD_REFRESH`, qui
+        republie passé un délai quoi qu'il arrive, et `cmd_forget` pour les chemins qui commandent
+        ailleurs.
+        """
+        if self.cmd_sent is None or abs(power - self.cmd_sent) > SmartMode.POWER_TOLERANCE:
+            return False
+        return (datetime.now() - self.cmd_sent_at).total_seconds() < CMD_REFRESH
+
+    def _cmd_keep(self, power: int) -> None:
+        """Mémorise la consigne RÉELLEMENT partie (les pilotes peuvent la modifier : kickstart)."""
+        self.cmd_sent = power
+        self.cmd_sent_at = datetime.now()
+
     async def power_charge(self, power: int) -> int:
         """Set charge power."""
         power = min(0, max(power, self.charge_limit))
         """power is here a negative value, but homeInput and homeOutput are always positive"""
-        if abs(power + self.homeInput.asInt - self.homeOutput.asInt) <= SmartMode.POWER_TOLERANCE:
+        if self._cmd_skip(power):
             _LOGGER.info("Power charge %s => no action [power %s]", self.name, power)
             return - self.homeInput.asInt
-        return await self.charge(power)
+        sent = await self.charge(power)
+        self._cmd_keep(sent)
+        return sent
 
     async def discharge(self, _power: int) -> int:
         """Set the power output/input."""
@@ -833,10 +919,12 @@ class ZendureDevice(EntityDevice):
     async def power_discharge(self, power: int) -> int:
         """Set discharge power."""
         power = max(0, min(power, self.discharge_limit))
-        if abs(power - self.homeOutput.asInt + self.homeInput.asInt) <= SmartMode.POWER_TOLERANCE:
+        if self._cmd_skip(power):
             _LOGGER.info("Power discharge %s => no action [power %s]", self.name, power)
             return self.homeOutput.asInt
-        return await self.discharge(power)
+        sent = await self.discharge(power)
+        self._cmd_keep(sent)
+        return sent
 
     async def power_off(self) -> None:
         """Set the power off."""

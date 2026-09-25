@@ -231,6 +231,7 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                         # only switch off, if Manager is used
                         if self.operation != ManagerMode.OFF:
                             await device.power_off()
+                            device.cmd_forget()  # 1.4.5.5 : commande hors power_charge/discharge
                         continue
                     case _:
                         _LOGGER.debug("Device %s has unsupported fuseGroup state: %s", device.name, device.fuseGroup.state)
@@ -302,6 +303,9 @@ class ZendureManager(DataUpdateCoordinator[None], EntityDevice):
                     if len(self.devices) > 0:
                         for d in self.devices:
                             await d.power_off()
+                            # 1.4.5.5 : l'appareil n'a plus la consigne que le miroir décrit. Sans
+                            # cet oubli, revenir en mode moteur pourrait sauter le premier envoi.
+                            d.cmd_forget()
 
     async def _async_update_data(self) -> None:
 
