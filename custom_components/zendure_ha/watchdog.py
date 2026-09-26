@@ -55,6 +55,16 @@ WD_WAKE_NUDGE = 60  # W, écart de réveil quand la dernière consigne était nu
 WD_RECENT = 45  # s, fenêtre « a reparlé récemment » (garde d'entrée du toggle BLE)
 WD_RESPONSE = 8  # s, fenêtre de réponse pour créditer un probe
 
+# --- 1.4.5.8 — RETOUR DU TOGGLE BLE : vérifié, réessayé (cf. `_ble_toggle`) -------------------
+# `WD_BLE_PAUSE` était un `asyncio.sleep(10)` en dur : le temps laissé à l'appareil pour prendre
+# en compte le broker intermédiaire avant qu'on le ramène.
+WD_BLE_PAUSE = 10       # s entre l'aller et le retour
+WD_BLE_ESSAIS = 3       # tentatives de retour avant d'alerter
+# Délai accordé à l'appareil pour CONFIRMER son retour en reparlant. Un Hyper publie toutes les
+# 6-20 s quand il va bien (mesuré), et met ~12 s à redémarrer sa pile après une reprovision BLE :
+# 30 s laissent donc au moins une publication de marge sans faire traîner le toggle.
+WD_BLE_CONFIRME = 30    # s d'attente d'une reprise de parole sur le bon client
+
 # --- 1.4.4.9 — RÉÉMISSION DE L'ARRÊT ---------------------------------------------------------
 # `power_off` était un « envoie et oublie » déclenché sur un ÉVÉNEMENT UNIQUE : le changement de
 # mode. Si l'appareil était injoignable à cet instant précis, rien ne rattrapait. Mesuré le
@@ -465,10 +475,52 @@ class MqttWatchdog:
             self.manager.hass.async_create_task(self._ble_toggle(d))
 
     async def _ble_toggle(self, d: ZendureDevice) -> None:
-        """Force une re-provision réseau par Bluetooth : bascule vers l'AUTRE broker puis revient au
-        COURANT. Le BLE est indépendant du réseau figé, c'est ce qui en fait le dernier recours.
-        Gardes : annule si le device a reparlé, retour au broker courant GARANTI (jamais d'orphelin),
-        single-flight."""
+        """Force une re-provision réseau par Bluetooth, puis VÉRIFIE que l'appareil est bien revenu.
+
+        Le BLE est indépendant du réseau figé : c'est ce qui en fait le dernier recours. Le principe
+        reste celui d'origine — écrire une AUTRE valeur d'`iotUrl` puis la bonne, parce qu'écrire
+        deux fois la même peut être un no-op côté firmware.
+
+        ⛔ 1.4.5.8 — LE RETOUR ÉTAIT TENTÉ, JAMAIS VÉRIFIÉ. L'ancienne version disait « retour au
+        broker courant GARANTI (jamais d'orphelin) ». Le `finally` garantissait l'APPEL, pas le
+        RÉSULTAT : `bleMqtt` renvoie un booléen que personne ne lisait, et un seul échec laissait
+        l'appareil sur l'autre broker — définitivement, puisque rien ne réessaie et que le watchdog
+        ne se redéclenche pas sur un appareil qui, de là-bas, parle très bien.
+
+        C'est le troisième endroit du même défaut cette semaine, après `mqttInvoke` (1.4.5.6) et la
+        garde de non-envoi (1.4.5.5) : une fonction qui rend un booléen, et un appelant qui le jette.
+
+        Ce que ça a coûté (mesuré le 26/09 dans les logs du `.178`) : `glagla` a quitté le broker
+        local le **19/09 à 16:13** et a passé **7 jours** sur le cloud — 0 publication locale contre
+        ~30 000/jour pour `up` — pendant que son sélecteur et le capteur affichaient « local ». Le
+        mécanisme n'est pas prouvé pour cet épisode précis (un appui sur « Reset connexion » laisse
+        la même trace), mais ce chemin-ci est le seul AUTOMATIQUE qui puisse déplacer un appareil et
+        l'y laisser.
+
+        ⇒ Trois changements, tous vérifiables :
+
+        1. **On part de l'état RÉEL** (`_broker_reel`, 1.4.5.7) et non du sélecteur. Si l'appareil est
+           déjà ailleurs que là où on le veut, l'aller n'a aucun intérêt — il le reprovisionnerait
+           là où il est déjà — et on va directement à la destination. Le détour de 10 s disparaît, et
+           avec lui le risque de l'y abandonner.
+        2. **Le retour est vérifié et réessayé** `WD_BLE_ESSAIS` fois. La confirmation n'est pas le
+           `True` de `bleMqtt` (qui dit seulement que la commande BLE est partie, et pose `d.mqtt`
+           lui-même) mais le fait que l'appareil **REPARLE** — `lastreport` qui avance — **et par le
+           bon client**. C'est la même exigence que partout ailleurs dans ce fichier : la preuve est
+           la mesure, pas l'envoi.
+        3. **Un échec définitif ALERTE.** Un appareil laissé sur le mauvais broker est un appareil
+           qu'on croit configuré d'une façon et qui fonctionne d'une autre. Ça ne doit pas être
+           silencieux — c'est précisément ce silence qui a duré une semaine.
+
+        ⚠️ La garantie d'origine est CONSERVÉE : l'aller est enveloppé séparément, donc une exception
+        pendant l'aller n'empêche pas le retour. Perdre cette propriété en corrigeant le reste aurait
+        remplacé un défaut par un pire.
+
+        ⏭️ Ce correctif empêche de CRÉER la situation ; il ne la répare pas seule. Un appareil déjà
+        sur le mauvais broker parle normalement, donc n'atteint jamais le palier de silence qui
+        déclenche ce toggle. La détection est posée en 1.4.5.7 (journal + capteur `mqttBroker`) ; agir
+        dessus automatiquement serait un changement de comportement, à décider séparément.
+        """
         from .api import Api
 
         st = self.state(d)
@@ -483,21 +535,72 @@ class MqttWatchdog:
                     _LOGGER.info("Watchdog %s: a reparlé avant le toggle BLE -> annulé", d.name)
                     return
 
-            current = getattr(d.connection, "value", 1)  # 0=cloud, 1=local
-            if current == 0:  # sur cloud : cloud -> local -> cloud
-                other, home = Api.mqttLocal, Api.mqttCloud
-            else:  # sur local : local -> cloud -> local
-                other, home = Api.mqttCloud, Api.mqttLocal
-            _LOGGER.warning("Watchdog %s: toggle BLE (courant=%s)", d.name, "cloud" if current == 0 else "local")
-            try:
-                if other is not None:
-                    await d.bleMqtt(other)
-                    await asyncio.sleep(10)
-            finally:
-                # retour au broker COURANT garanti, même si l'aller a échoué
-                if home is not None:
-                    await d.bleMqtt(home)
-        except Exception as err:
+            voulu = getattr(getattr(d, "connection", None), "value", 1)  # 0=cloud, 1=local
+            nom = "cloud" if voulu == 0 else "local"
+            maison = Api.mqttCloud if voulu == 0 else Api.mqttLocal
+            autre = Api.mqttLocal if voulu == 0 else Api.mqttCloud
+            if maison is None:
+                _LOGGER.warning("Watchdog %s: aucun client « %s » configuré -> toggle BLE annulé", d.name, nom)
+                return
+
+            reel = self._broker_reel(d)
+            _LOGGER.warning("Watchdog %s: toggle BLE (réel=%s, voulu=%s)", d.name, reel, nom)
+
+            # --- ALLER : uniquement s'il est déjà sur la destination (sinon c'est un no-op risqué).
+            # Enveloppé à part : quoi qu'il arrive ici, le retour ci-dessous a lieu.
+            if reel == nom and autre is not None:
+                try:
+                    await d.bleMqtt(autre)
+                    await asyncio.sleep(WD_BLE_PAUSE)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as err:  # noqa: BLE001
+                    _LOGGER.warning("Watchdog %s: aller BLE échoué (%s) — on tente le retour", d.name, err)
+            elif reel != nom:
+                _LOGGER.warning(
+                    "Watchdog %s: déjà sur « %s » alors qu'il doit être sur « %s » -> retour direct, sans aller",
+                    d.name, reel, nom,
+                )
+
+            # --- RETOUR : vérifié par une REPRISE DE PAROLE sur le bon client, et réessayé.
+            for essai in range(1, WD_BLE_ESSAIS + 1):
+                avant = d.lastreport
+                parti = await d.bleMqtt(maison)
+                if parti:
+                    limite = datetime.now() + timedelta(seconds=WD_BLE_CONFIRME)
+                    while datetime.now() < limite:
+                        await asyncio.sleep(2)
+                        if d.lastreport != avant and self._broker_reel(d) == nom:
+                            _LOGGER.warning("Watchdog %s: revenu sur « %s » et confirmé (essai %d)", d.name, nom, essai)
+                            return
+                _LOGGER.warning(
+                    "Watchdog %s: retour sur « %s » non confirmé (essai %d/%d, commande BLE %s)",
+                    d.name, nom, essai, WD_BLE_ESSAIS, "partie" if parti else "non partie",
+                )
+
+            # --- échec définitif : le dire, au lieu de laisser l'appareil ailleurs en silence.
+            _LOGGER.error(
+                "Watchdog %s: IMPOSSIBLE de le ramener sur « %s » après %d tentatives — il est "
+                "peut-être resté sur l'autre broker. Vérifier le capteur « Broker MQTT actif ».",
+                d.name, nom, WD_BLE_ESSAIS,
+            )
+            persistent_notification.async_create(
+                self.manager.hass,
+                f"**{d.name}** n'a pas pu être ramené sur le broker **{nom}** après "
+                f"**{WD_BLE_ESSAIS}** tentatives par Bluetooth.\n\n"
+                f"L'appareil parle peut-être par l'autre broker alors que son mode de connexion dit "
+                f"« {nom} ». Vérifier le capteur **Broker MQTT actif**, puis utiliser le bouton "
+                f"**Reset connexion**.",
+                "Zendure — appareil sur le mauvais broker",
+                f"zendure_broker_{d.deviceId}",
+            )
+            self.manager.hass.bus.async_fire(
+                "zendure_broker_mismatch",
+                {"device": d.name, "device_id": d.deviceId, "voulu": nom, "reel": self._broker_reel(d)},
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # noqa: BLE001
             _LOGGER.error("Watchdog %s: toggle BLE échec: %s", d.name, err)
         finally:
             st.ble_running = False
