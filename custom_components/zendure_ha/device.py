@@ -170,6 +170,12 @@ class ZendureDevice(EntityDevice):
         # 1.4.4.8 : envois MQTT perdus. `publish_broken` evite de journaliser a chaque cycle.
         self.publish_failed: int = 0
         self.publish_broken: bool = False
+        # 1.4.5.6 — LE DERNIER ENVOI DE CONSIGNE A-T-IL QUITTÉ LA MACHINE ? Posé à True par
+        # `power_charge`/`power_discharge` juste avant de commander, remis à False par le seul
+        # endroit qui sait qu'un envoi a raté (`_publish_fail` côté MQTT, `httpPost` côté zenSDK).
+        # Permet de le savoir SANS toucher aux 8 pilotes de `devices/` : ils appellent tous
+        # `mqttInvoke`/`doCommand`, qui passent par là. Cf. `power_discharge`.
+        self.send_ok: bool = True
         self.zendure: mqtt_client.Client | None = None
         self.ipAddress = definition.get("ip", "") if definition.get("ip", "") != "" else f"zendure-{definition['productModel'].replace(' ', '')}-{self.snNumber}.local"
         # ⛔ 1.4.3.53 — L'ADRESSE PEUT CHANGER, ET RIEN NE LE REMARQUAIT.
@@ -483,6 +489,7 @@ class ZendureDevice(EntityDevice):
     def _publish_fail(self, topic: str, raison: str) -> None:
         """Comptabilise un envoi perdu, et le journalise UNE fois par épisode."""
         self.publish_failed += 1
+        self.send_ok = False  # 1.4.5.6 : le moteur doit pouvoir le savoir (cf. `power_discharge`)
         if not self.publish_broken:
             self.publish_broken = True
             _LOGGER.warning(
@@ -908,8 +915,12 @@ class ZendureDevice(EntityDevice):
         if self._cmd_skip(power):
             _LOGGER.info("Power charge %s => no action [power %s]", self.name, power)
             return - self.homeInput.asInt
+        self.send_ok = True
         sent = await self.charge(power)
-        self._cmd_keep(sent)
+        if self.send_ok:
+            self._cmd_keep(sent)
+        else:
+            self.cmd_forget()  # 1.4.5.6 : rien n'est parti -> réémission au prochain cycle
         return sent
 
     async def discharge(self, _power: int) -> int:
@@ -917,13 +928,48 @@ class ZendureDevice(EntityDevice):
         return 0
 
     async def power_discharge(self, power: int) -> int:
-        """Set discharge power."""
+        """Set discharge power.
+
+        ⛔ 1.4.5.6 — LE CODE RETOUR ÉTAIT LU, PUIS JETÉ. La 1.4.4.8 a câblé le résultat de
+        `paho.publish()` jusqu'à `mqttPublish` et `mqttInvoke`, qui renvoient tous deux un booléen.
+        **Aucun appelant ne le lisait** : les 18 `mqttInvoke(...)` des pilotes de `devices/`,
+        `doCommand` (qui jette aussi le retour de `httpPost`), et ces deux fonctions-ci. Le seul
+        effet subsistant était le compteur `publish_failed` et la sonde `pub=` du CSV.
+
+        Conséquence : `fondation` écrivait `cmd_applied` comme si la consigne était partie. Or
+        `cmd_applied` signifie « ce que l'appareil a », et quatre mécanismes s'appuient dessus :
+          - `inflight` (1.4.4.5/.7) comptait une commande jamais partie -> `en_vol` gelait
+            l'intégrale ET le fast-track, donc le moteur cessait de corriger un écart réel ;
+          - le slew rampait depuis une consigne fictive ;
+          - `chg_accept`/`prod_accept` concluaient au REFUS d'un appareil qui n'avait rien reçu,
+            et le plafond faux tenait ensuite 10 min (`CHG_CAP_TTL`) ;
+          - `diagnostic.py` nommait comme coupable un appareil sans ordre.
+        Ce n'est pas théorique : `up` est injoignable **1,9 % du temps** (mesuré sur 127 h,
+        23 épisodes, jusqu'à 28 min d'affilée).
+
+        ⇒ On ne mémorise la consigne comme APPLIQUÉE que si elle a quitté la machine. `send_ok`
+        porte l'information sans qu'aucun des 8 pilotes ait à changer : ils passent tous par
+        `mqttInvoke` ou `doCommand`, donc par `_publish_fail` / `httpPost`.
+
+        ⚠️ Le contrat de retour est INCHANGÉ (`-> int`, la puissance demandée) : les modes amont
+        font `setpoint -= await d.power_charge(pwr)` et un changement de sémantique là-dedans
+        toucherait des chemins qu'on ne mesure pas. C'est `cmd_sent` que le moteur lit.
+
+        ⚠️ ET ÇA NE PROUVE TOUJOURS PAS L'EXÉCUTION — même mise en garde qu'en 1.4.4.8 : `rc == 0`
+        dit que le message est entré dans la file du client, pas que l'appareil l'a appliqué. La
+        confirmation reste le `properties/report` qui suit. On supprime un mensonge, on n'obtient
+        pas une certitude.
+        """
         power = max(0, min(power, self.discharge_limit))
         if self._cmd_skip(power):
             _LOGGER.info("Power discharge %s => no action [power %s]", self.name, power)
             return self.homeOutput.asInt
+        self.send_ok = True
         sent = await self.discharge(power)
-        self._cmd_keep(sent)
+        if self.send_ok:
+            self._cmd_keep(sent)
+        else:
+            self.cmd_forget()  # 1.4.5.6 : rien n'est parti -> réémission au prochain cycle
         return sent
 
     async def power_off(self) -> None:
@@ -1161,6 +1207,7 @@ class ZendureZenSdk(ZendureDevice):
             _LOGGER.error("%s for %s during httpPost%s", type(e).__name__, self.name, f": {e}" if str(e) else "!")
             self.lastseen = datetime.min
             self._http_ko()
+            self.send_ok = False  # 1.4.5.6 : jumeau de `_publish_fail`, côté zenSDK
             return False
         return True
 

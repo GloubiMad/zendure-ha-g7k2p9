@@ -2013,7 +2013,14 @@ class FondationEngine:
         setpoint = 0
         for d in devices:
             c = int(cmd[d])
-            self.cmd_applied[d.deviceId] = c  # mémorise pour le slew-rate du prochain cycle
+            # ⛔ 1.4.5.6 — `cmd_applied` ÉTAIT ÉCRIT AVANT L'ENVOI, DONC MÊME QUAND IL RATAIT.
+            # Il signifie « ce que l'appareil a », et quatre mécanismes le lisent : `inflight`
+            # (donc `en_vol`, donc le gel de l'intégrale ET du fast-track), le slew, la mesure
+            # d'acceptation (`chg_accept`/`prod_accept`, dont le plafond tient 10 min) et le
+            # diagnostic. Le renseigner sur une consigne perdue les faisait tous mentir dans le
+            # même sens : le moteur croyait avoir agi. Cf. `device.power_discharge`.
+            # Il est donc écrit APRÈS l'envoi, et seulement s'il a eu lieu — ce qui couvre aussi
+            # la branche `continue` ci-dessous, où l'on ne commande volontairement rien.
             self.cmd_target[d.deviceId] = c
             if (ent := self._cmd_ent.get(d.deviceId)) is not None:
                 ent.update_value(c)
@@ -2034,6 +2041,11 @@ class FondationEngine:
                 # Hyper active son bypass en SOCFULL, situation devenue permanente quand tout le parc
                 # a atteint 100 %. Le zéro doit partir.
                 await d.power_discharge(0 if max(0, d.pwr_offgrid) == 0 else 10)
+            # `cmd_sent` à None = l'envoi a échoué (`device.cmd_forget`) : on LAISSE `cmd_applied`
+            # sur sa valeur précédente, qui est justement ce que l'appareil a encore. La garde de
+            # non-envoi étant elle aussi oubliée, la consigne repart au prochain cycle.
+            if d.cmd_sent is not None:
+                self.cmd_applied[d.deviceId] = c
 
         # --- observabilité ---
         self.sensor_state.update_value(self.regime.value)
