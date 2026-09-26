@@ -37,7 +37,7 @@ from typing import Any
 from homeassistant.components import persistent_notification
 
 from .binary_sensor import ZendureBinarySensor
-from .const import ManagerMode
+from .const import ManagerMode, SmartMode
 from .device import ZendureDevice, ZendureLegacy
 from .sensor import ZendureSensor
 
@@ -93,6 +93,8 @@ class _WdState:
     off_last: datetime | None = None
     off_tries: int = 0
     off_alerted: bool = False
+    # 1.4.5.7 — dernier broker REEL publie (pour ne journaliser qu'au changement)
+    broker_vu: str = ""
     # 1.4.5.0 — device jamais vu depuis le chargement
     first_tick: datetime | None = None
     cold_last: datetime | None = None
@@ -131,11 +133,78 @@ class MqttWatchdog:
                 "silence": ZendureSensor(d, "mqttSilence", None, "s", "duration", "measurement", 0, state=0),
                 "stalled": ZendureBinarySensor(d, "mqttStalled", None, "problem"),
                 "lastwake": ZendureSensor(d, "mqttLastWake", state="—"),
-                "broker": ZendureSensor(d, "mqttBroker", state="local"),
+                "broker": ZendureSensor(d, "mqttBroker", state="?"),  # 1.4.5.7 : on ne PRETEND plus savoir
                 # 1.4.4.9 : reste à 0 tant que l'arrêt est obtenu du premier coup — donc aucun
                 # churn de recorder en fonctionnement normal.
                 "offretry": ZendureSensor(d, "mqttOffRetry", None, None, None, "measurement", 0, state=0),
             }
+
+    def _broker_reel(self, d: ZendureDevice) -> str:
+        """Par où les commandes de CET appareil partent VRAIMENT.
+
+        ⛔ 1.4.5.7 — CE CAPTEUR RECOPIAIT LE SÉLECTEUR. Il s'écrivait :
+
+            self._set(d, "broker", "cloud" if getattr(d.connection, "value", 1) == 0 else "local")
+
+        soit la PRÉFÉRENCE de l'utilisateur, jamais le transport. Un capteur nommé « Broker MQTT
+        actif » qui affiche un réglage est pire que pas de capteur : il donne une réponse fausse à
+        la seule question qu'on lui pose.
+
+        Coût réel, mesuré le 26/09/2026 : `glagla` a quitté le broker local le **19/09 à 16:13**
+        (dernier `properties/report` ; 0 publication sur les 7 jours suivants, contre ~30 000/jour
+        pour `up`) et parle depuis par le cloud — pendant que ce capteur affichait « local ».
+        L'utilisateur s'est fié à l'affichage, moi aussi, et j'en ai tiré une comparaison entre les
+        deux Hyper qui ne tenait pas : je croyais comparer « un appareil en local » à « un appareil
+        en cloud » alors que les deux sont RÉGLÉS en local. Il a fallu lire les logs du broker pour
+        s'en apercevoir. Une semaine de configuration silencieusement fausse.
+
+        Ce qui l'a déplacé est `api.mqttMsgCloud` : `device.mqtt = client` dès qu'un message arrive
+        par le cloud, et rien ne ramène jamais l'appareil. Le capteur, lui, ne pouvait pas le voir
+        puisqu'il ne regardait pas `device.mqtt`.
+
+        ⇒ On lit donc `d.mqtt`, c'est-à-dire l'objet que `mqttPublish` utilise réellement. Les
+        quatre états sont distincts et signifient chacun quelque chose :
+          `local`  / `cloud`  : le client correspondant ;
+          `zensdk`           : pas de MQTT, l'appareil est piloté en HTTP local (SolarFlow) ;
+          `aucun`            : `d.mqtt is None` — les commandes ne partent NULLE PART.
+        """
+        from .api import Api
+
+        conn = getattr(d, "connection", None)  # annotation sans valeur sur ZendureDevice de base
+        if getattr(conn, "value", None) == SmartMode.ZENSDK:
+            return "zensdk"
+        mqtt = getattr(d, "mqtt", None)
+        if mqtt is None:
+            return "aucun"
+        hote = getattr(mqtt, "host", None)
+        if hote and Api.localServer and hote == Api.localServer:
+            return "local"
+        if hote and Api.cloudServer and hote == Api.cloudServer:
+            return "cloud"
+        return str(hote) if hote else "?"
+
+    def _broker_surveille(self, d: ZendureDevice) -> None:
+        """Publie le broker réel et JOURNALISE un écart avec le réglage, une fois par changement.
+
+        Le capteur seul ne suffit pas : personne ne regarde un capteur qui ne bouge jamais. Un
+        appareil qui migre en silence doit laisser une ligne dans le journal, sinon on ne
+        l'apprend qu'une semaine plus tard en lisant les logs d'un broker.
+        """
+        reel = self._broker_reel(d)
+        st = self.state(d)
+        if reel == st.broker_vu:
+            return
+        st.broker_vu = reel
+        self._set(d, "broker", reel)
+        conn = getattr(d, "connection", None)
+        voulu = {0: "cloud", 1: "local", SmartMode.ZENSDK: "zensdk"}.get(getattr(conn, "value", None))
+        if voulu is not None and reel != voulu and reel != "?":
+            _LOGGER.warning(
+                "Zendure %s : les commandes partent par « %s » alors que le mode de connexion est "
+                "réglé sur « %s ». L'appareil a migré de broker et rien ne l'y ramène — "
+                "utiliser le bouton « Reset connexion » pour le remettre.",
+                d.name, reel, voulu,
+            )
 
     def _e(self, d: ZendureDevice, key: str) -> Any:
         return self._ent.get(d.deviceId, {}).get(key)
@@ -156,6 +225,9 @@ class MqttWatchdog:
 
         for d in self.manager.devices:
             st = self.state(d)
+            # 1.4.5.7 — AVANT le `continue` du bloc « jamais vu » : un appareil qu'on n'a jamais
+            # entendu est justement celui dont on veut savoir par ou on lui parle.
+            self._broker_surveille(d)
 
             if d.lastreport == datetime.min:
                 if st.stage != 0:  # jamais vu / marqué hors-ligne ailleurs -> reset état
@@ -199,7 +271,6 @@ class MqttWatchdog:
 
             stale = int((now - (d.lastreport - timedelta(minutes=5))).total_seconds())
             self._set(d, "silence", stale if stale > t_getall else 0)
-            self._set(d, "broker", "cloud" if getattr(d.connection, "value", 1) == 0 else "local")
 
             # --- cadence normale / reprise ---
             if stale <= t_getall:

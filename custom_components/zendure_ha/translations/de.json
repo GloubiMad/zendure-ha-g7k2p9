@@ -164,7 +164,8 @@
           "3": "Keine Sicherungsgruppe",
           "10": "Verbunden (Cloud)",
           "11": "Verbunden (Local)",
-          "12": "Verbunden (zenSDK)"
+          "12": "Verbunden (zenSDK)",
+          "13": "Kein MQTT-Client"
         }
       },
       "soh": {

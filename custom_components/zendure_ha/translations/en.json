@@ -262,7 +262,8 @@
           "3": "No FuseGroup",
           "10": "Connected cloud",
           "11": "Connected local",
-          "12": "Connected (zenSDK)"
+          "12": "Connected (zenSDK)",
+          "13": "No MQTT client"
         }
       },
       "soh": {

@@ -174,7 +174,8 @@
           "3": "Brak grupy bezpiecznikowej",
           "10": "Połączono z chmurą",
           "11": "Połączono lokalnie",
-          "12": "Połączono (zenSDK)"
+          "12": "Połączono (zenSDK)",
+          "13": "Brak klienta MQTT"
         }
       },
       "soh": {

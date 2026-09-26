@@ -146,7 +146,8 @@
           "3": "Geen Zekeringgroep",
           "10": "Verbonden (Cloud)",
           "11": "Verbonden (Local)",
-          "12": "Verbonden (zenSDK)"
+          "12": "Verbonden (zenSDK)",
+          "13": "Geen MQTT-client"
         }
       },
       "so_h": {
@@ -223,7 +224,7 @@
         "name": "Elektriciteitsniveau (SoC)"
       },
       "global_soc": {
-         "name": "Globale batterij SOC"
+        "name": "Globale batterij SOC"
       },
       "roundtrip_efficiency": {
         "name": "Retourrendement"
@@ -257,7 +258,7 @@
           "2": "Aan",
           "3": "Directe netlevering"
         }
-      },      
+      },
       "output_pack_power": {
         "name": "Batterij Laden"
       },

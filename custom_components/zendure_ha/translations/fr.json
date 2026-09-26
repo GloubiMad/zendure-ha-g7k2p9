@@ -255,7 +255,8 @@
           "3": "Pas de groupe de fusible",
           "10": "Connecté (Cloud)",
           "11": "Connecté (Local)",
-          "12": "Connecté (zenSDK)"
+          "12": "Connecté (zenSDK)",
+          "13": "Aucun client MQTT"
         }
       },
       "so_h": {

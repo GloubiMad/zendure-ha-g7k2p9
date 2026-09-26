@@ -337,6 +337,21 @@ class ZendureDevice(EntityDevice):
                 self.connectionStatus.update_value(12)
             elif self.mqtt is not None and self.mqtt.host == Api.localServer:
                 self.connectionStatus.update_value(11)
+            # ⛔ 1.4.5.7 — LA VALEUR 10 AFFIRMAIT « CLOUD » SANS LE SAVOIR.
+            # Le `else` final attrapait DEUX situations que rien ne distinguait ensuite :
+            # le client cloud, et `self.mqtt is None` — c'est-à-dire AUCUN client, donc des
+            # commandes qui ne partent nulle part. La traduction, elle, annonçait « Connecté
+            # (Cloud) » dans les deux cas.
+            #
+            # Ça m'a fait conclure de travers le 26/09 : `glagla` était à 10, j'en ai déduit
+            # « il est configuré sur le cloud », et bâti là-dessus une comparaison avec `up`
+            # qui ne tenait pas (l'utilisateur a corrigé : les deux sont réglés en local).
+            # Il fallait la sonde `pub=` pour trancher — un `self.mqtt` à None aurait fait
+            # échouer le `getAll` de `dataRefresh` chaque minute, donc incrémenté
+            # `publish_failed` ; comme `pub=` est resté vide sur 20 h, c'était bien le cloud.
+            # Une étiquette qui exige une seconde mesure pour être lue ne sert à rien.
+            elif self.mqtt is None:
+                self.connectionStatus.update_value(13)
             else:
                 self.connectionStatus.update_value(10)
         except Exception:
