@@ -48,10 +48,24 @@ _LOGGER = logging.getLogger(__name__)
 # Cadence de veille mesurée (nuit 08→09/07) : p95 ~60 s, max 118 s (up) / 181 s (glagla).
 # Le getAll (lecture inoffensive) peut être bas pour la visibilité ; les ACTES (puissance/BLE)
 # doivent rester AU-DESSUS du plafond de veille pour ne pas agir sur un device simplement oisif.
-WD_GETALL = 45
-WD_POWER = 120
-WD_BLE = 160
-WD_ALERT = 200
+# ⛔ 1.4.5.12 — DÉFAUTS RELEVÉS AUX VALEURS RÉELLEMENT EXPLOITÉES (300/400/500/600).
+# Ils ne servent qu'à une INSTALLATION NEUVE ou à une restauration perdue — les valeurs vives sont
+# les `number` du Manager. Mais c'est exactement ce cas qui a coûté quatre jours de réglages le
+# 24/07 : l'interface affichait la valeur réglée pendant que le moteur appliquait le défaut
+# (course de construction, cf. `FondationNumber`).
+#
+# ⚠️ CE QUI REND L'ANCIEN `WD_BLE = 160` DANGEREUX AUJOURD'HUI : zenSDK #84 — depuis HEMS 2.0, le
+# provisionnement BLE d'une URL MQTT locale DÉCONNECTE l'unité du Wi-Fi. C'est ce que fait
+# `_ble_toggle`. Un repli silencieux sur 160 s déclencherait donc un toggle BLE toutes les 160 s
+# sur un appareil simplement oisif — un Hyper à l'arrêt n'a rien à publier, donc se tait
+# légitimement. Le défaut ne doit jamais être plus agressif que ce qu'on sait sûr.
+#
+# La règle d'origine reste vraie et est respectée : le getAll (lecture inoffensive) peut être le
+# plus bas, les ACTES (puissance, puis BLE) restent au-dessus du plafond de veille.
+WD_GETALL = 300
+WD_POWER = 400
+WD_BLE = 500
+WD_ALERT = 600
 WD_WAKE_NUDGE = 60  # W, écart de réveil quand la dernière consigne était nulle (≈ mini utile Hyper)
 WD_RECENT = 45  # s, fenêtre « a reparlé récemment » (garde d'entrée du toggle BLE)
 WD_RESPONSE = 8  # s, fenêtre de réponse pour créditer un probe
