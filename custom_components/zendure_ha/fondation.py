@@ -908,6 +908,12 @@ class FondationEngine:
         # CHRONO : temps de CALCUL pur (jusqu'à _apply_and_report) vs temps d'I/O (envoi des
         # commandes). Répond à « d'où viennent les ~600 ms ? » : le calcul doit être <10 ms, l'I/O
         # (httpGet du SolarFlow en amont + envoi des consignes) est le vrai coût. Affiché dans `ms=`.
+        # 1.4.5.11 — l'âge du dernier rapport, publié pour TOUS les devices et AVANT le filtre
+        # ci-dessous : celui-ci écarte les `OFFLINE`, qui sont justement ceux dont on veut l'âge.
+        # Posé avant le chrono pour ne pas polluer `ms=` (arithmétique sur 3 devices, négligeable,
+        # mais le chrono mesure le temps de CALCUL du moteur et rien d'autre).
+        self.manager.watchdog.rafraichir_age()
+
         self._t0 = perf_counter()
         # fuseGrp n'est pas assigné pour un device hors fusegroup (annotation sans valeur
         # dans device.py) -> l'exclure du moteur au lieu de crasher sur les caps.

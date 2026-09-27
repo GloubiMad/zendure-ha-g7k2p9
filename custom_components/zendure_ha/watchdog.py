@@ -151,6 +151,12 @@ class MqttWatchdog:
                 # ⭐ Alimenté depuis `lastreport`, donc STRICTEMENT la même grandeur que la
                 # colonne `Age` du `simulation.csv` — les deux sont comparables directement.
                 "lastreport": ZendureSensor(d, "mqttLastReport", None, None, "timestamp", None),
+                # 1.4.5.11 — L'ÂGE EN SECONDES, SANS AUCUN SEUIL. `silence` ci-dessus ne sert pas :
+                # il est écrasé à 0 sous `t_getall` (300 s en réglage courant) alors que le p90 du
+                # trou de `up` mesuré le 19/09 valait 230 s ⇒ il affichait 0 pendant au moins 90 %
+                # des silences qu'on cherchait. Ici : la valeur brute, rafraîchie à la cadence de la
+                # boucle rapide (~1-2 s, cf. `rafraichir_age`).
+                "age": ZendureSensor(d, "mqttAge", None, "s", "duration", "measurement", 0, state=0),
                 "stalled": ZendureBinarySensor(d, "mqttStalled", None, "problem"),
                 "lastwake": ZendureSensor(d, "mqttLastWake", state="—"),
                 "broker": ZendureSensor(d, "mqttBroker", state="?"),  # 1.4.5.7 : on ne PRETEND plus savoir
@@ -158,6 +164,32 @@ class MqttWatchdog:
                 # churn de recorder en fonctionnement normal.
                 "offretry": ZendureSensor(d, "mqttOffRetry", None, None, None, "measurement", 0, state=0),
             }
+
+    def rafraichir_age(self) -> None:
+        """Publie l'âge du dernier rapport, en secondes, SANS SEUIL.
+
+        ⭐ 1.4.5.11 — POURQUOI PAS DANS `tick()`. `tick` est appelé depuis `_async_update_data`,
+        donc **une fois par minute** (`SCAN_INTERVAL = 60 s`) : un compteur alimenté là aurait une
+        granularité de 60 s, inutile pour des silences de 30 à 230 s. On est donc appelé depuis
+        `fondation.update()`, qui tourne sur l'événement du compteur P1, soit toutes les 1-2 s.
+
+        ⚠️ ET AVANT SON FILTRE `OFFLINE`. `fondation.update` écarte les devices `OFFLINE` de sa
+        liste de travail ; or ce sont précisément ceux dont on veut connaître l'âge. Publier après
+        le filtre gèlerait le capteur exactement quand il devient intéressant — même forme que le
+        « cliquet du silence ».
+
+        ⚠️ `lastreport` est une date de PÉREMPTION (« message + 5 min »), d'où le retrait.
+        Tant qu'on n'a jamais entendu l'appareil, on publie `None` (« indisponible ») plutôt qu'un
+        âge inventé depuis `datetime.min`.
+        """
+        now = datetime.now()
+        for d in self.manager.devices:
+            if d.deviceId not in self._ent:
+                continue
+            if d.lastreport == datetime.min:
+                self._set(d, "age", None)
+                continue
+            self._set(d, "age", int((now - (d.lastreport - timedelta(minutes=5))).total_seconds()))
 
     def _broker_reel(self, d: ZendureDevice) -> str:
         """Par où les commandes de CET appareil partent VRAIMENT.

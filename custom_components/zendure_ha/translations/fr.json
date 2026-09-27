@@ -468,6 +468,9 @@
       "mqtt_last_report": {
         "name": "Dernier rapport MQTT"
       },
+      "mqtt_age": {
+        "name": "Muet depuis"
+      },
       "mqtt_last_wake": {
         "name": "Dernier réveil MQTT"
       },
