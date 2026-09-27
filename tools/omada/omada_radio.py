@@ -16,11 +16,15 @@ import getpass
 import json
 import ssl
 import sys
+import re
+import time
 import urllib.request
 from datetime import datetime, timedelta
 
 HOTE = "192.168.0.171"
 PORTS = [(8043, "https"), (443, "https"), (8088, "http"), (80, "http")]
+HEURES = 6          # profondeur du journal a recuperer
+APS = {"A8-29-48-E6-AB-C0": "EAP770", "20-E1-5D-1F-E1-94": "EAP610-out"}
 CIBLES = {"94-C9-60-E0-2A-0E": "up", "94-C9-60-D8-BD-AE": "glagla", "38-44-BE-83-D3-B8": "Mr big"}
 
 ctx = ssl.create_default_context()
@@ -120,35 +124,62 @@ def main():
               f" {duree(c.get('uptime')):>12} {str(c.get('trafficDown') or '-'):>10}{marque}")
     print()
 
-    # ---------------------------------------------------------------- 3. historique / evenements
-    print("=== RECHERCHE DE L'HISTORIQUE (endpoints candidats) ===")
-    mac_up = "94-C9-60-E0-2A-0E"
-    for nom, chemin in [
-        ("events (v2)",      f"/{cid}/api/v2/sites/{sid}/events?currentPage=1&currentPageSize=200"),
-        ("logs/events",      f"/{cid}/api/v2/sites/{sid}/logs/events?currentPage=1&currentPageSize=200"),
-        ("insight/logs",     f"/{cid}/api/v2/sites/{sid}/insight/logs?currentPage=1&currentPageSize=200"),
-        ("client detail",    f"/{cid}/api/v2/sites/{sid}/clients/{mac_up}"),
-        ("client insight",   f"/{cid}/api/v2/sites/{sid}/insight/clients/{mac_up}"),
-        ("client timeline",  f"/{cid}/api/v2/sites/{sid}/insight/clients/{mac_up}/timeline?currentPage=1&currentPageSize=200"),
-        ("client history",   f"/{cid}/api/v2/sites/{sid}/clients/{mac_up}/history?currentPage=1&currentPageSize=200"),
-        ("stat client",      f"/{cid}/api/v2/sites/{sid}/stat/clients/{mac_up}"),
-    ]:
-        try:
-            r = appel(base + chemin, entetes=h)
-        except Exception as e:
-            print(f"  {nom:16s} -> HTTP {type(e).__name__}")
-            continue
+    # ---------------------------------------------------------------- 3. journal d'evenements
+    # ⭐ L'ENDPOINT QUI MARCHE (trouve le 27/09/2026) : la PLAGE DE DATES est OBLIGATOIRE.
+    # Sans `filters.timeStart` / `filters.timeEnd` en millisecondes, le controleur repond
+    # « General error ». Les 7 autres chemins essayes auparavant (logs, setting/logs,
+    # insight/logs, clients/{mac}/history, insight/clients/{mac}, stat/clients/{mac}, et POST
+    # sur logs/events) n'existent pas sur cette version : ne PAS les reessayer.
+    fin_ms = int(time.time() * 1000)
+    deb_ms = fin_ms - HEURES * 3600 * 1000
+    print(f"=== JOURNAL D'EVENEMENTS (dernieres {HEURES} h) ===")
+    evts, page = [], 1
+    while True:
+        u = (f"{base}/{cid}/api/v2/sites/{sid}/logs/events?currentPage={page}&currentPageSize=100"
+             f"&filters.timeStart={deb_ms}&filters.timeEnd={fin_ms}")
+        r = appel(u, entetes=h)
         if r.get("errorCode") != 0:
-            print(f"  {nom:16s} -> refuse ({r.get('msg')})")
-            continue
-        res = r.get("result")
-        if isinstance(res, dict) and "data" in res:
-            n = len(res["data"])
-            print(f"  {nom:16s} -> OK, {n} entrees (total {res.get('totalRows','?')})")
-            for e in res["data"][:6]:
-                print(f"        {json.dumps(e, ensure_ascii=False)[:190]}")
-        else:
-            print(f"  {nom:16s} -> OK : {json.dumps(res, ensure_ascii=False)[:300]}")
+            print(f"  refuse : {r.get('msg')}")
+            break
+        res = r.get("result") or {}
+        data = res.get("data", [])
+        evts.extend(data)
+        if len(evts) >= int(res.get("totalRows", 0)) or not data:
+            break
+        page += 1
+    print(f"  {len(evts)} evenements au total")
+
+    def lisible(e):
+        txt = e.get("content") or ""
+        for mac, nom in CIBLES.items():
+            txt = txt.replace(f"[client:{mac}]", f"<{nom}>")
+        for mac, nom in APS.items():
+            txt = txt.replace(f"[ap:{mac}]", nom)
+        return txt
+
+    interessant = [e for e in evts if any(m.lower() in json.dumps(e).lower() for m in CIBLES)]
+    print(f"  dont {len(interessant)} concernant les Zendure\n")
+    for e in sorted(interessant, key=lambda x: x.get("time", 0)):
+        print(f"  {horo(e.get('time')):>14}  {lisible(e)[:150]}")
+
+    # --- resume : c'est la DUREE DE SESSION qui sert de mesure de controle.
+    # Elle valait ~32 s tant que « Lock to Wireless Device » etait actif sur `up`.
+    print("\n  --- resume par appareil ---")
+    for mac, nom in CIBLES.items():
+        lignes = [e for e in interessant if mac.lower() in json.dumps(e).lower()]
+        off = [e for e in lignes if "went offline" in (e.get("content") or "")]
+        refus = [e for e in lignes if "failed to connect" in (e.get("content") or "")]
+        roam = [e for e in lignes if "oaming" in (e.get("content") or "")]
+        durees = []
+        for e in off:
+            m2 = re.search(r"\((\d+)s connected", e.get("content") or "")
+            if m2:
+                durees.append(int(m2.group(1)))
+        durees.sort()
+        med = durees[len(durees) // 2] if durees else None
+        detail = f" | session mediane {med} s (min {durees[0]}, max {durees[-1]})" if med is not None else ""
+        print(f"  {nom:8s} {len(off):3d} deconnexions | {len(refus):3d} refus | {len(roam):3d} roamings{detail}")
+    print()
 
     try:
         appel(f"{base}/{cid}/api/v2/logout", "POST", {}, h)
