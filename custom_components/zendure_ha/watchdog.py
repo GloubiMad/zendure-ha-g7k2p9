@@ -35,6 +35,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from homeassistant.components import persistent_notification
+from homeassistant.util import dt as dt_util
 
 from .binary_sensor import ZendureBinarySensor
 from .const import ManagerMode, SmartMode
@@ -141,6 +142,15 @@ class MqttWatchdog:
             self._ent[d.deviceId] = {
                 # 0 tant que le silence est normal -> pas de churn recorder ; ne monte qu'en silence ANORMAL
                 "silence": ZendureSensor(d, "mqttSilence", None, "s", "duration", "measurement", 0, state=0),
+                # 1.4.5.10 — « DEPUIS QUAND N'A-T-IL PLUS PARLÉ », la question que `silence` ne
+                # sait pas rendre : il est volontairement ÉCRASÉ À 0 sous `t_getall` (cf. tick),
+                # parce qu'un compteur de secondes écrirait une ligne de recorder par cycle. Un
+                # `timestamp`, lui, ne change QUE lorsque l'appareil rapporte vraiment : aucune
+                # écriture pendant un silence, et c'est le gel de la valeur qui porte
+                # l'information. HA l'affiche en relatif (« il y a 4 min ») sans rien écrire.
+                # ⭐ Alimenté depuis `lastreport`, donc STRICTEMENT la même grandeur que la
+                # colonne `Age` du `simulation.csv` — les deux sont comparables directement.
+                "lastreport": ZendureSensor(d, "mqttLastReport", None, None, "timestamp", None),
                 "stalled": ZendureBinarySensor(d, "mqttStalled", None, "problem"),
                 "lastwake": ZendureSensor(d, "mqttLastWake", state="—"),
                 "broker": ZendureSensor(d, "mqttBroker", state="?"),  # 1.4.5.7 : on ne PRETEND plus savoir
@@ -281,6 +291,14 @@ class MqttWatchdog:
 
             stale = int((now - (d.lastreport - timedelta(minutes=5))).total_seconds())
             self._set(d, "silence", stale if stale > t_getall else 0)
+            # 1.4.5.10 : l'instant réel du dernier rapport. `lastreport` est une date de PÉREMPTION
+            # (« message + 5 min »), d'où le retrait — même arithmétique que la ligne au-dessus.
+            # ⚠️ `lastreport` est naïf (`datetime.now()`) alors qu'un `device_class=timestamp` exige
+            # un fuseau : on attache le fuseau LOCAL, pas UTC, sinon l'horodatage serait décalé de
+            # deux heures (`dt_util.as_local` traiterait le naïf comme de l'UTC).
+            # `update_value` ne réécrit que si la valeur change, donc appeler ceci à chaque cycle ne
+            # coûte rien tant que l'appareil se tait.
+            self._set(d, "lastreport", (d.lastreport - timedelta(minutes=5)).replace(tzinfo=dt_util.DEFAULT_TIME_ZONE))
 
             # --- cadence normale / reprise ---
             if stale <= t_getall:

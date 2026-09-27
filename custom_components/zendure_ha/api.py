@@ -301,10 +301,6 @@ class Api:
                 if "isHA" in payload:
                     return
 
-                # 1.4.5.9 : un message de l'appareil est arrivé — avant tout aiguillage par topic,
-                # et après le filtre `isHA` pour ne pas compter nos propres publications.
-                device.mqttHeartbeat()
-
                 if self.mqttLogging:
                     _LOGGER.info("Topic: %s => %s", msg.topic.replace(device.deviceId, device.name).replace(device.snNumber, "snxxx"), payload)
 
@@ -340,14 +336,6 @@ class Api:
 
                 if "isHA" in payload:
                     return
-
-                # 1.4.5.9 : idem côté broker local. Un seul point d'appel par callback, pas de
-                # logique recopiée — la forme récurrente des bugs de ce dépôt est « une décision
-                # écrite à deux endroits, corrigée à un seul ».
-                # ⛔ PAS dans `mqttMsgDevice` : ce callback sert le client `device.zendure`, qui est
-                # connecté au CLOUD Zendure. Ce qu'il reçoit vient du cloud (commandes de l'appli),
-                # pas de l'appareil — ce ne serait donc pas une preuve qu'il parle.
-                device.mqttHeartbeat()
 
                 if self.mqttLogging:
                     _LOGGER.info("Local topic: %s => %s", msg.topic.replace(device.deviceId, device.name).replace(device.snNumber, "snxxx"), payload)

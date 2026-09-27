@@ -168,9 +168,6 @@
           "13": "Kein MQTT-Client"
         }
       },
-      "last_mqtt": {
-        "name": "Letzte MQTT-Nachricht"
-      },
       "soh": {
         "name": "Gesundheitszustand"
       },

@@ -266,9 +266,6 @@
           "13": "No MQTT client"
         }
       },
-      "last_mqtt": {
-        "name": "Last MQTT Message"
-      },
       "soh": {
         "name": "SoH"
       },
