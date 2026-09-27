@@ -188,30 +188,55 @@ def main():
         # changement de regime, qu'une mediane globale noierait.
         sess = [(e.get("time"), secondes(e.get("content") or "")) for e in off]
         sess = sorted([(t, d) for t, d in sess if d is not None])
-        med = sorted(d for _, d in sess)[len(sess) // 2] if sess else None
-        detail = (f" | mediane {duree(med)} (min {duree(sess[0][1] if sess else 0)},"
-                  f" max {duree(max(d for _, d in sess))})") if med is not None else ""
+        tri = sorted(d for _, d in sess)          # par DUREE, pour la mediane et les bornes
+        med = tri[len(tri) // 2] if tri else None
+        detail = (f" | mediane {duree(med)} (min {duree(tri[0])}, max {duree(tri[-1])})"
+                  ) if med is not None else ""
         print(f"  {nom:8s} {len(off):3d} deconnexions | {len(refus):3d} refus | {len(roam):3d} roamings{detail}")
         if sess:
             suite = "  ".join(f"{horo(t)[-8:]}:{duree(d)}" for t, d in sess[-14:])
             print(f"           sessions (fin:duree, chronologique) {suite}")
 
     # --- un changement de canal de l'AP se lit comme un « roaming » de CHACUN de ses
-    # clients, a la MEME seconde. Deux clients differents qui « roament » ensemble du meme
-    # AP/canal vers le meme AP/canal, ce n'est pas eux qui bougent : c'est l'AP.
-    par_sec: dict[tuple, set] = {}
+    # clients, a quelques secondes d'intervalle. Deux clients DIFFERENTS qui « roament »
+    # ensemble du meme AP/canal vers le meme AP/canal, ce ne sont pas eux qui bougent :
+    # c'est l'AP. Un roaming solitaire, lui, est un vrai deplacement de client.
+    #
+    # ⛔ NE PAS regrouper par tranches fixes (`time // 2000`) : une frontiere de tranche
+    # separe deux evenements voisins une fois sur deux. On trie puis on agrege par ECART.
+    # 30 s : les clients d'un meme AP ne constatent pas son changement de canal en meme
+    # temps. Mesure du 27/09 : 1 s d'ecart sur l'EAP610 mais 15 s sur l'EAP770 (8->11),
+    # donc une fenetre de 5 s ratait la moitie des cas.
+    ECART_AP = 30.0                                 # secondes
+    mouv: dict[tuple, list] = {}
     for e in evts:
-        txt = e.get("content") or ""
-        m2 = re.search(r"roaming from (.+?) to (.+?) with", txt)
-        if m2 and e.get("time"):
-            par_sec.setdefault((int(e["time"]) // 2000, m2.group(1), m2.group(2)),
-                               set()).add(e.get("client") or json.dumps(e)[:40])
-    collectif = {k: v for k, v in par_sec.items() if len(v) > 1}
+        m2 = re.search(r"roaming from (.+?) to (.+?) with", e.get("content") or "")
+        if not (m2 and e.get("time")):
+            continue
+        c = e.get("client")
+        if isinstance(c, dict):                     # `client` est parfois un objet, pas une MAC
+            c = c.get("mac") or c.get("name")
+        mouv.setdefault((m2.group(1), m2.group(2)), []).append(
+            (int(e["time"]), str(c or json.dumps(e, sort_keys=True)[:40])))
+
+    collectif = []
+    for (dep, arr), liste in mouv.items():
+        grappe: list = []
+        for t_ms, qui in sorted(liste):
+            if grappe and t_ms - grappe[-1][0] > ECART_AP * 1000:
+                if len({q for _, q in grappe}) > 1:
+                    collectif.append((grappe[0][0], dep, arr, {q for _, q in grappe}))
+                grappe = []
+            grappe.append((t_ms, qui))
+        if len({q for _, q in grappe}) > 1:
+            collectif.append((grappe[0][0], dep, arr, {q for _, q in grappe}))
+
     if collectif:
         print("\n  --- changements de canal de l'AP (et non des clients) ---")
-        for (t2, dep, arr), qui in sorted(collectif.items()):
-            print(f"  {horo(t2 * 2000)}  {dep} -> {arr}  ({len(qui)} clients deplaces ensemble)")
-        print("  => canal automatique : chaque changement coute une coupure a tous ses clients.")
+        for t_ms, dep, arr, qui in sorted(collectif):
+            print(f"  {horo(t_ms)}  {dep} -> {arr}  ({len(qui)} clients deplaces ensemble)")
+        print("  => changement de canal de l'AP (auto-RF ou manuel) : il coute une coupure")
+        print("     a CHACUN de ses clients. Figer le canal a la main supprime les coupures auto.")
     print()
 
     try:
