@@ -164,21 +164,54 @@ def main():
 
     # --- resume : c'est la DUREE DE SESSION qui sert de mesure de controle.
     # Elle valait ~32 s tant que « Lock to Wireless Device » etait actif sur `up`.
+    #
+    # ⛔ PIEGE CORRIGE le 27/09 : la 1re version cherchait `(\d+)s connected`, donc elle
+    # ne voyait QUE les sessions libellees en secondes. Omada ecrit « (3m connected »,
+    # « (2h2m connected » des qu'une session depasse la minute ⇒ toutes les BONNES sessions
+    # etaient exclues du calcul et la mediane restait collee aux echecs. Le resume annoncait
+    # « 32 s » alors que l'appareil tenait deja 3 puis 7 minutes.
+    def secondes(txt: str) -> int | None:
+        m2 = re.search(r"\(((?:\d+[hms])+) connected", txt)
+        if not m2:
+            return None
+        return sum(int(n) * {"h": 3600, "m": 60, "s": 1}[u]
+                   for n, u in re.findall(r"(\d+)([hms])", m2.group(1)))
+
     print("\n  --- resume par appareil ---")
     for mac, nom in CIBLES.items():
         lignes = [e for e in interessant if mac.lower() in json.dumps(e).lower()]
-        off = [e for e in lignes if "went offline" in (e.get("content") or "")]
+        off = [e for e in lignes if "went offline" in (e.get("content") or "")
+               or "is disconnected from" in (e.get("content") or "")]
         refus = [e for e in lignes if "failed to connect" in (e.get("content") or "")]
         roam = [e for e in lignes if "oaming" in (e.get("content") or "")]
-        durees = []
-        for e in off:
-            m2 = re.search(r"\((\d+)s connected", e.get("content") or "")
-            if m2:
-                durees.append(int(m2.group(1)))
-        durees.sort()
-        med = durees[len(durees) // 2] if durees else None
-        detail = f" | session mediane {med} s (min {durees[0]}, max {durees[-1]})" if med is not None else ""
+        # (fin de session, duree) dans l'ORDRE du temps : c'est ainsi qu'on voit un
+        # changement de regime, qu'une mediane globale noierait.
+        sess = [(e.get("time"), secondes(e.get("content") or "")) for e in off]
+        sess = sorted([(t, d) for t, d in sess if d is not None])
+        med = sorted(d for _, d in sess)[len(sess) // 2] if sess else None
+        detail = (f" | mediane {duree(med)} (min {duree(sess[0][1] if sess else 0)},"
+                  f" max {duree(max(d for _, d in sess))})") if med is not None else ""
         print(f"  {nom:8s} {len(off):3d} deconnexions | {len(refus):3d} refus | {len(roam):3d} roamings{detail}")
+        if sess:
+            suite = "  ".join(f"{horo(t)[-8:]}:{duree(d)}" for t, d in sess[-14:])
+            print(f"           sessions (fin:duree, chronologique) {suite}")
+
+    # --- un changement de canal de l'AP se lit comme un « roaming » de CHACUN de ses
+    # clients, a la MEME seconde. Deux clients differents qui « roament » ensemble du meme
+    # AP/canal vers le meme AP/canal, ce n'est pas eux qui bougent : c'est l'AP.
+    par_sec: dict[tuple, set] = {}
+    for e in evts:
+        txt = e.get("content") or ""
+        m2 = re.search(r"roaming from (.+?) to (.+?) with", txt)
+        if m2 and e.get("time"):
+            par_sec.setdefault((int(e["time"]) // 2000, m2.group(1), m2.group(2)),
+                               set()).add(e.get("client") or json.dumps(e)[:40])
+    collectif = {k: v for k, v in par_sec.items() if len(v) > 1}
+    if collectif:
+        print("\n  --- changements de canal de l'AP (et non des clients) ---")
+        for (t2, dep, arr), qui in sorted(collectif.items()):
+            print(f"  {horo(t2 * 2000)}  {dep} -> {arr}  ({len(qui)} clients deplaces ensemble)")
+        print("  => canal automatique : chaque changement coute une coupure a tous ses clients.")
     print()
 
     try:
