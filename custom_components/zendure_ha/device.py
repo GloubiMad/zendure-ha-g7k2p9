@@ -216,8 +216,25 @@ class ZendureDevice(EntityDevice):
         # Les confondre laisserait passer le mode de panne du bug TLS : un appareil qui répond
         # encore mais ne publie plus son état paraîtrait sain. Même convention pour les deux :
         # la valeur stockée est « instant du dernier message + 5 min ».
+        #
+        # ⚠️ CETTE CONVENTION N'EST PAS UN HORODATAGE, C'EST UNE DATE DE PÉREMPTION. `power_get`
+        # purge `lastseen` dès qu'elle est passée (`if lastseen < now: lastseen = datetime.min`),
+        # et `online` se lit « la péremption n'est pas encore atteinte ». Conséquences à connaître :
+        #   - tout lecteur qui veut l'INSTANT du dernier message doit retrancher 5 min
+        #     (`simulation.py:154`, `watchdog.py:282` et `:533` le font) ;
+        #   - `lastreport`, lui, n'est JAMAIS purgé — aucune ligne ne le remet à `datetime.min`
+        #     hors de cet `__init__`. Son `+5 min` est donc recopié de `lastseen` sans usage,
+        #     et ne sert qu'à obliger chaque lecteur à le défaire.
+        # ⛔ Ne pas exposer ces deux champs tels quels dans une entité : on publierait un
+        #    horodatage dans le futur. C'est `lastpacket` ci-dessous qui est fait pour ça.
         self.lastseen = datetime.min
         self.lastreport = datetime.min
+        # 1.4.5.9 — BATTEMENT DE CŒUR : horodatage NU du dernier message MQTT reçu de l'appareil,
+        # posé par `mqttHeartbeat()` depuis les callbacks d'`api.py`, avant tout aiguillage par
+        # topic. Il ne périme pas, ne se retranche pas, et ne décide de RIEN dans le moteur.
+        # Il répond à la seule question que ni `lastseen` ni `lastreport` ne savent rendre en
+        # entité : « depuis quand cet appareil n'a-t-il plus parlé ».
+        self.lastpacket: datetime = datetime.min
         self._messageid = 0
         self.kWh = 0.0
 
@@ -279,6 +296,11 @@ class ZendureDevice(EntityDevice):
         self.availableKwh = ZendureSensor(self, "available_kwh", None, "kWh", "energy_storage", None, 1)
         self.totalKwh = ZendureSensor(self, "total_kwh", None, "kWh", "energy_storage", "measurement", 2)
         self.connectionStatus = ZendureSensor(self, "connectionStatus")
+        # 1.4.5.9 — `sensor.<nom>_last_mqtt` : device_class `timestamp`, donc HA l'affiche en
+        # relatif (« il y a 4 min ») et le recorder l'historise. Le seul indicateur de fraîcheur
+        # exposé qui ne dépende pas du filtre « valeur changée » de `ZendureSensor.update_value` :
+        # un horodatage diffère à chaque message, donc l'état est toujours réécrit.
+        self.lastMqttTime = ZendureSensor(self, "lastMqtt", None, None, "timestamp", None)
         self.connection: ZendureRestoreSelect
         self.bleAdapter: ZendureRestoreSelect | None = None
         self.remainingTime = ZendureSensor(self, "remainingTime", None, "h", "duration", "measurement")
@@ -523,6 +545,32 @@ class ZendureDevice(EntityDevice):
         command["deviceKey"] = self.deviceId
         command["timestamp"] = int(datetime.now().timestamp())
         return self.mqttPublish(self.topic_function, command)
+
+    def mqttHeartbeat(self) -> None:
+        """Un message de cet appareil vient d'arriver. Point.
+
+        ⭐ 1.4.5.9 — POURQUOI CE POINT D'ENTRÉE EST À PART. La fraîcheur était jusqu'ici dérivée
+        AU FOND de `mqttMessage`, donc elle héritait de tous les accidents de l'aiguillage par
+        topic : les topics qui tombent dans le `return False` final ne rafraîchissaient rien,
+        alors que recevoir le message prouve que l'appareil parle. Et le champ concerné
+        (`lastseen`) est le MÊME que celui qui décide de l'exclusion du moteur — impossible
+        d'améliorer l'observabilité sans risquer la régulation.
+
+        Ici on est appelé depuis `api.py` (`mqttMsgCloud`, `mqttMsgLocal`), après la résolution
+        du device et après le filtre `isHA` — qui écarte nos propres publications, sans quoi on
+        mesurerait notre propre bavardage. Donc : tous les topics, aucune sémantique, aucun effet
+        sur `lastseen`, `lastreport`, `state` ni `connectionStatus`.
+
+        ⚠️ `dt_util.now()` et non `datetime.now()` : un capteur `device_class=timestamp` exige un
+        datetime AVEC fuseau, sinon HA refuse l'état. C'est la convention déjà suivie par
+        `nextCalibration`.
+
+        ⚠️ Appelé depuis le thread paho, pas depuis la boucle HA. `update_value` passe par
+        `schedule_update_ha_state()`, qui est sûr depuis un autre thread (`hass.add_job`) — c'est
+        déjà ce que fait le traitement de `properties/energy`.
+        """
+        self.lastpacket = dt_util.now()
+        self.lastMqttTime.update_value(self.lastpacket)
 
     async def mqttProperties(self, payload: Any) -> None:
         # Un `properties/report` prouve les DEUX : la liaison répond ET l'état est rapporté.
@@ -1201,7 +1249,17 @@ class ZendureZenSdk(ZendureDevice):
             url = f"http://{self._http_host()}/{url}"
             response = await self.session.get(url, headers=CONST_HEADER, timeout=CONST_TIMEOUT)
             payload = json.loads(await response.text())
-            self.lastseen = datetime.now()
+            # ⛔ 1.4.5.9 — ÉTAIT `datetime.now()`, SANS LES 5 MINUTES. `lastseen` n'est pas un
+            # horodatage mais une DATE DE PÉREMPTION (cf. `__init__`) : `power_get` purge tout ce
+            # qui est `< now`. Poser `now` tout court, c'est écrire « périmé depuis une
+            # microseconde » — au cycle suivant le champ retombait à `datetime.min`, donc
+            # `online` était faux, donc OFFLINE : **un httpGet RÉUSSI valait un httpGet ÉCHOUÉ.**
+            # Défaut resté LATENT, et seulement par chance : les deux appelants (`dataRefresh`,
+            # `power_get`) enchaînent sur `mqttProperties`, qui réestampille correctement juste
+            # après et écrasait le mauvais marquage. Mais la signature prévoit de ne lire qu'UNE
+            # clé (`key=`) sans passer par là : le premier appel de ce genre aurait déclaré
+            # l'appareil hors ligne sur une requête qui a marché.
+            self.lastseen = datetime.now() + timedelta(minutes=5)
             self._http_ok()
             return payload if key is None else payload.get(key, {})
         except Exception as e:

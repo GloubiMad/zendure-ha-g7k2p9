@@ -259,6 +259,9 @@
           "13": "Aucun client MQTT"
         }
       },
+      "last_mqtt": {
+        "name": "Dernier message MQTT"
+      },
       "so_h": {
         "name": "État de santé"
       },

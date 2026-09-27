@@ -150,6 +150,9 @@
           "13": "Geen MQTT-client"
         }
       },
+      "last_mqtt": {
+        "name": "Laatste MQTT-bericht"
+      },
       "so_h": {
         "name": "Gezondheidsstatus"
       },

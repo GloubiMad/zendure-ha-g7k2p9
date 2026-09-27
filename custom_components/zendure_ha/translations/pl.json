@@ -178,6 +178,9 @@
           "13": "Brak klienta MQTT"
         }
       },
+      "last_mqtt": {
+        "name": "Ostatnia wiadomosc MQTT"
+      },
       "soh": {
         "name": "SoH"
       },
