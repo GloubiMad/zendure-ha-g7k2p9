@@ -1,0 +1,47 @@
+# Clients Wi-Fi Omada — version NATIVE, sans dependance HACS.
+# A coller dans une carte MANUELLE.
+#
+# ⚠️ Les entity_id sont DEDUITS des noms renvoyes par le controleur (endpoint
+# `insight/clients`), pas lus dans HA. Ceux des Proxy BLE et du HA Voice sont les plus
+# incertains : ces entites sont rattachees a des appareils ESPHome existants et HA a pu
+# prefixer leur nom. Verifier dans Outils de developpement > Etats, filtre `device_tracker.`
+# Preferer la version `omada_wifi_auto.yaml` quand `auto-entities` est disponible.
+type: entities
+title: Clients Wi-Fi Omada
+state_color: true
+show_header_toggle: false
+entities:
+  - entity: device_tracker.94_c9_60_e0_2a_0e_up
+    name: Zendure up
+  - entity: device_tracker.94_c9_60_d8_bd_ae_glagla
+    name: Zendure glagla
+  - entity: device_tracker.zendure_mr_big
+    name: Zendure Mr Big
+  - entity: device_tracker.apsystems
+    name: APsystems 1
+  - entity: device_tracker.apsystems_2
+    name: APsystems 2
+  - entity: device_tracker.proxy_ble_central
+    name: Proxy BLE Central
+  - entity: device_tracker.proxy_ble_allee
+    name: Proxy BLE Allee
+  - entity: device_tracker.proxy_ble_sdb
+    name: Proxy BLE SDB
+  - entity: device_tracker.proxy_ble_salle_nord
+    name: Proxy BLE Salle Nord
+  - entity: device_tracker.home_assistant_voice_0a66a3
+    name: HA Voice
+  - entity: device_tracker.tablette_ha
+    name: Tablette HA 1
+  - entity: device_tracker.tablette_ha_2
+    name: Tablette HA 2
+  - entity: device_tracker.mova_mower_g2584d
+    name: Tondeuse Mova
+  - entity: device_tracker.bambu_p2s
+    name: Bambu P2S
+  - entity: device_tracker.oneplus_open
+    name: OnePlus Open
+  - entity: device_tracker.advisen
+    name: Advisen
+  - entity: device_tracker.dream
+    name: dream

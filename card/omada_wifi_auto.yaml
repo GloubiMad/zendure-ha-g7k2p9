@@ -1,0 +1,24 @@
+# Clients Wi-Fi Omada — version AUTOMATIQUE (necessite `auto-entities`, HACS).
+# A coller dans une carte MANUELLE. Ne demande aucun entity_id : prend tous les
+# device_tracker de l'integration tplink_omada, y compris les clients futurs.
+#
+# Pourquoi cette carte existe : les device_tracker d'Omada sont des `ScannerEntity`,
+# qui ne declarent AUCUN `device_info` et ne creent donc PAS d'appareil. Ils
+# n'apparaissent pas dans l'onglet « Appareils » de l'integration — seuls y figurent
+# les AP adoptes et les rares clients dont la MAC correspond a un appareil HA
+# existant (ESPHome). Les entites, elles, existent bien : 2 AP x 4 + 17 clients = 25.
+type: custom:auto-entities
+card:
+  type: entities
+  title: Clients Wi-Fi Omada
+  state_color: true
+  show_header_toggle: false
+filter:
+  include:
+    - integration: tplink_omada
+      domain: device_tracker
+      options:
+        secondary_info: last-changed
+sort:
+  method: friendly_name
+show_empty: false
