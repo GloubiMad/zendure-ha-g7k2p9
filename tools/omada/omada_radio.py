@@ -158,6 +158,17 @@ def main():
         if m:
             NOMS[m] = c.get("name") or NOMS.get(m, m)
     NOMS.update(CIBLES)                  # nos noms courts l'emportent
+
+    # ⛔ 30/09 — DEUX CLIENTS PEUVENT PORTER LE MEME NOM. Il y a ici deux « apsystems », un sur
+    # chaque AP. Le resume groupant par NOM, il les fusionnait en une seule ligne : un refus
+    # « Lock To AP » apparaissait sans qu'on puisse dire lequel des deux l'avait subi. On
+    # desambiguise par les 5 derniers caracteres du MAC des qu'un nom est porte plusieurs fois.
+    doublons = {n for n in NOMS.values() if list(NOMS.values()).count(n) > 1}
+    if doublons:
+        for mac, nom in list(NOMS.items()):
+            if nom in doublons:
+                NOMS[mac] = f"{nom} [{mac[-5:]}]"
+        print(f"  (noms portes par plusieurs clients, desambiguises : {', '.join(sorted(doublons))})")
     print(f"  ({len(NOMS)} clients connus du controleur, actifs ou non)\n")
 
     # ---------------------------------------------------------------- 3. journal d'evenements
