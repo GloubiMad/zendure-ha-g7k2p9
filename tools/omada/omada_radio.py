@@ -27,6 +27,14 @@ HEURES = 6          # profondeur du journal a recuperer
 APS = {"A8-29-48-E6-AB-C0": "EAP770", "20-E1-5D-1F-E1-94": "EAP610-out"}
 CIBLES = {"94-C9-60-E0-2A-0E": "up", "94-C9-60-D8-BD-AE": "glagla", "38-44-BE-83-D3-B8": "Mr big"}
 
+# ⛔ 30/09 — LE POINT AVEUGLE. Le filtre du journal ne connaissait que les 3 MAC ci-dessus : sur un
+# relevé de 252 évènements il en jetait 226, dont tous ceux des AUTRES clients. On a donc passé
+# trois jours à analyser les Zendure sans voir que d'autres appareils décrochaient aussi.
+# Désormais : les noms sont appris depuis `insight/clients` (Known Clients — inclut les appareils
+# actuellement HORS LIGNE, contrairement à `clients?filters.active=true`), et `SURVEILLE` choisit
+# qui détailler. Vide = tout le monde.
+SURVEILLE: list[str] = []   # ex. ["up", "Advisen"] ; vide -> tous les clients du journal
+
 ctx = ssl.create_default_context()
 ctx.check_hostname = False
 ctx.verify_mode = ssl.CERT_NONE
@@ -124,6 +132,34 @@ def main():
               f" {duree(c.get('uptime')):>12} {str(c.get('trafficDown') or '-'):>10}{marque}")
     print()
 
+    # --- carte MAC -> nom lisible, pour TOUT le monde.
+    # `insight/clients` (Known Clients) est le seul endpoint qui liste aussi les appareils hors
+    # ligne : un client qui décroche en boucle est souvent absent de la liste des ACTIFS au moment
+    # du relevé, et c'est précisément celui qu'on cherche.
+    NOMS: dict[str, str] = {}
+    page = 1
+    while True:
+        try:
+            r = appel(f"{base}/{cid}/api/v2/sites/{sid}/insight/clients?currentPage={page}"
+                      f"&currentPageSize=100", entetes=h)
+        except Exception:
+            break
+        res = r.get("result") or {}
+        data = res.get("data", [])
+        for c in data:
+            m = (c.get("mac") or "").upper()
+            if m:
+                NOMS[m] = c.get("name") or m
+        if len(NOMS) >= int(res.get("totalRows", 0)) or not data:
+            break
+        page += 1
+    for c in tous:                       # les actifs complètent (noms parfois plus à jour)
+        m = (c.get("mac") or "").upper()
+        if m:
+            NOMS[m] = c.get("name") or NOMS.get(m, m)
+    NOMS.update(CIBLES)                  # nos noms courts l'emportent
+    print(f"  ({len(NOMS)} clients connus du controleur, actifs ou non)\n")
+
     # ---------------------------------------------------------------- 3. journal d'evenements
     # ⭐ L'ENDPOINT QUI MARCHE (trouve le 27/09/2026) : la PLAGE DE DATES est OBLIGATOIRE.
     # Sans `filters.timeStart` / `filters.timeEnd` en millisecondes, le controleur repond
@@ -151,14 +187,28 @@ def main():
 
     def lisible(e):
         txt = e.get("content") or ""
-        for mac, nom in CIBLES.items():
+        for mac, nom in NOMS.items():
             txt = txt.replace(f"[client:{mac}]", f"<{nom}>")
         for mac, nom in APS.items():
             txt = txt.replace(f"[ap:{mac}]", nom)
         return txt
 
-    interessant = [e for e in evts if any(m.lower() in json.dumps(e).lower() for m in CIBLES)]
-    print(f"  dont {len(interessant)} concernant les Zendure\n")
+    def qui(e) -> str | None:
+        """Quel client concerne cet evenement ? (par son MAC, ou None si aucun)"""
+        brut = json.dumps(e).upper()
+        for mac, nom in NOMS.items():
+            if mac in brut:
+                return nom
+        return None
+
+    for e in evts:
+        e["_qui"] = qui(e)
+    if SURVEILLE:
+        interessant = [e for e in evts if e["_qui"] in SURVEILLE]
+        print(f"  dont {len(interessant)} concernant {', '.join(SURVEILLE)}\n")
+    else:
+        interessant = [e for e in evts if e["_qui"]]
+        print(f"  dont {len(interessant)} rattaches a un client connu\n")
     for e in sorted(interessant, key=lambda x: x.get("time", 0)):
         print(f"  {horo(e.get('time')):>14}  {lisible(e)[:150]}")
 
@@ -177,9 +227,19 @@ def main():
         return sum(int(n) * {"h": 3600, "m": 60, "s": 1}[u]
                    for n, u in re.findall(r"(\d+)([hms])", m2.group(1)))
 
+    def octets(txt: str) -> float | None:
+        """Volume transfere pendant la session. Une session qui ne porte que 2-3 KB n'a jamais
+        servi a rien : c'est de l'association pure, donc une boucle (DHCP, authentification,
+        redemarrage du client) et non un usage reel interrompu."""
+        m2 = re.search(r"([\d.]+)(KB|MB|GB|B)\)", txt)
+        if not m2:
+            return None
+        return float(m2.group(1)) * {"B": 1, "KB": 1e3, "MB": 1e6, "GB": 1e9}[m2.group(2)]
+
     print("\n  --- resume par appareil ---")
-    for mac, nom in CIBLES.items():
-        lignes = [e for e in interessant if mac.lower() in json.dumps(e).lower()]
+    noms_vus = sorted({e["_qui"] for e in interessant if e["_qui"]})
+    for nom in noms_vus:
+        lignes = [e for e in interessant if e["_qui"] == nom]
         off = [e for e in lignes if "went offline" in (e.get("content") or "")
                or "is disconnected from" in (e.get("content") or "")]
         refus = [e for e in lignes if "failed to connect" in (e.get("content") or "")]
@@ -192,7 +252,14 @@ def main():
         med = tri[len(tri) // 2] if tri else None
         detail = (f" | mediane {duree(med)} (min {duree(tri[0])}, max {duree(tri[-1])})"
                   ) if med is not None else ""
-        print(f"  {nom:8s} {len(off):3d} deconnexions | {len(refus):3d} refus | {len(roam):3d} roamings{detail}")
+        vol = [o for o in (octets(e.get("content") or "") for e in off) if o is not None]
+        if vol:
+            vol.sort()
+            med_o = vol[len(vol) // 2]
+            detail += f" | octets/session : mediane {med_o/1000:.1f} KB"
+            if med_o < 10_000:
+                detail += "  <-- ASSOCIATION PURE, la session n'a jamais servi"
+        print(f"  {str(nom)[:18]:18s} {len(off):3d} deconnexions | {len(refus):3d} refus | {len(roam):3d} roamings{detail}")
         if sess:
             suite = "  ".join(f"{horo(t)[-8:]}:{duree(d)}" for t, d in sess[-14:])
             print(f"           sessions (fin:duree, chronologique) {suite}")
