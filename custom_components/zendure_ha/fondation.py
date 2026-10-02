@@ -2286,11 +2286,46 @@ class FondationEngine:
                 cmd[d] = take
                 out -= take
             rem = total_charge
-            for d in sinks:
-                take = min(rem, chg_cap(d))
-                cmd[d] = -take
-                rem -= take
-                fuse_used[d.fuseGrp] = fuse_used.get(d.fuseGrp, 0.0) + take
+            # ⛔ 02/10/2026 — `parallel` N'ÉTAIT IMPLÉMENTÉ QUE DANS L'AUTRE BRANCHE DE CHARGE.
+            # Ici le remplissage était purement séquentiel : le premier puits prenait tout ce
+            # qu'il pouvait, le suivant le reliquat. L'utilisateur avait beau choisir `parallel`,
+            # cette branche retombait EN SILENCE sur « le plus vide d'abord » — et comme les deux
+            # puits sans PV sont `up` (3,84 kWh) et `Mr big` (8,16 kWh), le plus gros, parti de
+            # plus bas, n'a jamais fini de se remplir : `up` n'a jamais rien reçu.
+            # MESURÉ le 02/10 : up 182 Wh contre 5383 pour les autres, SoC bloqué à 20 % toute la
+            # journée. La bascule est nette à 15:04 — up passe à 0 dès que Mr big, à 15 %, devient
+            # plus vide que lui.
+            # Même formule de poids qu'à la branche jumelle (~ligne 1802) pour que les deux sites
+            # ne puissent plus diverger : la place restante en Wh, soit (100 − SoC) × capacité.
+            # ⚠️ `chg_cap(d)` est relu à chaque attribution (et non figé) pour que deux puits d'un
+            # MÊME fusegroup ne puissent pas se faire doubler leur budget. `pris` borne en plus
+            # chaque appareil à sa propre limite de charge sur les DEUX passes.
+            if self.charge_strategy.value == 3 and len(sinks) > 1:
+                poids = {d: max(1.0, (100 - d.electricLevel.asInt) * d.kWh) for d in sinks}
+                total_p = sum(poids.values())
+                budget = rem
+                pris: dict[ZendureDevice, float] = {d: 0.0 for d in sinks}
+                for d in sinks:
+                    part = budget * poids[d] / total_p if total_p > 0 else 0.0
+                    take = max(0.0, min(part, chg_cap(d), -d.charge_limit - pris[d]))
+                    cmd[d] = -take
+                    pris[d] += take
+                    rem -= take
+                    fuse_used[d.fuseGrp] = fuse_used.get(d.fuseGrp, 0.0) + take
+                for d in sinks:  # 2e passe : le reliquat va à ceux qui ont encore de la place
+                    if rem <= 0:
+                        break
+                    take = max(0.0, min(rem, chg_cap(d), -d.charge_limit - pris[d]))
+                    cmd[d] -= take
+                    pris[d] += take
+                    rem -= take
+                    fuse_used[d.fuseGrp] = fuse_used.get(d.fuseGrp, 0.0) + take
+            else:
+                for d in sinks:
+                    take = min(rem, chg_cap(d))
+                    cmd[d] = -take
+                    rem -= take
+                    fuse_used[d.fuseGrp] = fuse_used.get(d.fuseGrp, 0.0) + take
         else:
             # DÉFICIT : le producteur sort son solaire PUIS puise dans sa batterie jusqu'à
             # `min_engage`, et seulement au-delà les autres batteries prennent le relais.
