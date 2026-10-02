@@ -23,7 +23,9 @@ et doit d'abord servir à caractériser le phénomène.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import datetime, timedelta
+from itertools import groupby
 from time import perf_counter
 
 from homeassistant.components import persistent_notification
@@ -383,6 +385,92 @@ class FondationEngine:
             return False
         self.engage_why.pop(d.deviceId, None)
         return True
+
+    def _repartir_charge(
+        self,
+        puits: list[ZendureDevice],
+        budget: float,
+        place: Callable[[ZendureDevice], float],
+        compte: Callable[[ZendureDevice, float], None],
+        cmd: dict[ZendureDevice, float],
+        seuil: float | None,
+        now: datetime,
+    ) -> float:
+        """Répartit `budget` W de charge entre `puits`, DÉJÀ TRIÉS par l'appelant.
+        Retourne ce qui a été RÉELLEMENT placé.
+
+        ⭐ 1.4.5.15 — UNE SEULE ÉCRITURE DE LA DÉCISION. Trois sites faisaient ce même travail
+        avec trois codes différents (routage du surplus, répartition `cand`, branche STORE) :
+        `parallel` manquait à deux d'entre eux, le reliquat d'un puits déjà réveillé n'était
+        rendu que par un seul, un seul écrasait la consigne au lieu de l'ajouter, et un seul
+        n'avait aucun seuil de réveil. Trois versions, trois comportements, et aucun moyen de
+        savoir laquelle tournait : c'est la forme exacte de tous les bugs graves de ce dépôt.
+        Les 1.4.5.13 et .14 l'ont payé — deux correctifs appliqués au mauvais site.
+
+        ⭐⭐ LE PRORATA S'APPLIQUE DANS UN RANG, JAMAIS À TRAVERS LES RANGS.
+        Un producteur STOCKE LUI-MÊME ce que la maison ne consomme pas : ses petits reliquats
+        n'ont pas besoin de nous, et les router coûterait deux conversions. Mais sa batterie est
+        le SEUL débouché de son PV au-delà de sa limite AC — glagla produit jusqu'à 1727 W pour
+        1200 W de sortie. Lui remplir la batterie TÔT, c'est le condamner à ÉCRÊTER SES PROPRES
+        PANNEAUX plus tard, et cette énergie-là est définitivement perdue.
+        D'où le rang : les batteries SANS PV d'abord, les producteurs seulement avec ce qui
+        reste. En `parallel` le partage se fait donc entre ÉGAUX — sans quoi le producteur
+        recevrait sa part en même temps que les autres et perdrait sa marge.
+
+        Ce qui reste À L'APPELANT, parce que ça diffère légitimement :
+          - l'ORDRE de `puits` (le tri dépend de la stratégie ET du régime) ;
+          - le plafond `place(d)` (`chg_room` route du solaire, `chg_cap` répartit un besoin) ;
+          - le compteur de fusegroup `compte(d, take)`.
+        """
+        if budget <= 0 or not puits:
+            return 0.0
+        pris: dict[str, float] = {d.deviceId: 0.0 for d in puits}
+        engages: set[str] = set()
+        reste, total = budget, 0.0
+
+        def dispo(d: ZendureDevice) -> float:
+            # `place(d)` est relu à chaque fois (le compteur de fusegroup a bougé) ; `pris` borne
+            # en plus l'appareil à sa PROPRE limite sur l'ensemble des passes.
+            return max(0.0, min(place(d), -d.charge_limit - pris[d.deviceId], reste))
+
+        def permis(d: ZendureDevice, take: float) -> bool:
+            # ⚠️ Le seuil ne vaut que pour RÉVEILLER : on ne démarre pas un onduleur pour 5 W.
+            # Mais un puits DÉJÀ commandé prend le reliquat sans aucun coût de démarrage, et le
+            # lui refuser renverrait ces watts AU RÉSEAU. Mesuré sur un budget de 100 W partagé
+            # en 32/68 : les 32 W de la part refusée restaient non placés.
+            if take <= 0:
+                return False
+            return seuil is None or d.deviceId in engages or self._engage_ok(d, take, seuil, now, charge=True)
+
+        def servir(d: ZendureDevice, take: float) -> None:
+            nonlocal reste, total
+            cmd[d] -= take  # on AJOUTE : ne jamais écraser une consigne de production
+            reste -= take
+            total += take
+            pris[d.deviceId] += take
+            engages.add(d.deviceId)
+            compte(d, take)
+
+        # `puits` est trié par `(sans-PV d'abord, …)` : grouper sur la même clé donne les rangs.
+        for _, rang_iter in groupby(puits, key=self._has_pv):
+            if reste <= 0:
+                break
+            rang = list(rang_iter)
+            if self.charge_strategy.value == 3 and len(rang) > 1:
+                poids = {d: max(1.0, (100 - d.electricLevel.asInt) * d.kWh) for d in rang}
+                total_p = sum(poids.values())
+                budget_rang = reste
+                for d in rang:
+                    take = min(budget_rang * poids[d] / total_p if total_p > 0 else 0.0, dispo(d))
+                    if permis(d, take):
+                        servir(d, take)
+            for d in rang:  # 2e passe DU RANG, et seul chemin hors `parallel`
+                if reste <= 0:
+                    break
+                take = dispo(d)
+                if permis(d, take):
+                    servir(d, take)
+        return total
 
     @staticmethod
     def _tag(i: int, d: ZendureDevice) -> str:
@@ -1645,40 +1733,20 @@ class FondationEngine:
                         # rien changé pour l'utilisateur — mesuré, `up` seul chargeait encore.
                         # Même formule et même structure qu'à la ligne ~1801 (prorata puis
                         # reliquat), pour que les trois sites cessent de diverger.
-                        engages: set[str] = set()  # déjà réveillés CE cycle (cf. 2e passe)
-                        if self.charge_strategy.value == 3 and len(sinks) > 1:
-                            poids = {d: max(1.0, (100 - d.electricLevel.asInt) * d.kWh) for d in sinks}
-                            total_p = sum(poids.values())
-                            budget = rem
-                            for d in sinks:
-                                part = budget * poids[d] / total_p if total_p > 0 else 0.0
-                                take = min(part, chg_room(d), rem)
-                                # Une part trop petite est refusée par le seuil d'engagement ; son
-                                # budget n'est pas perdu, la 2e passe le redonne à qui peut le prendre.
-                                if take <= 0 or not self._engage_ok(d, take, SOLAR_ENGAGE, now, charge=True):
-                                    continue
-                                cmd[d] -= take
-                                rem -= take
-                                alloue += take
-                                engages.add(d.deviceId)
-                                fuse_chg[d.fuseGrp] = fuse_chg.get(d.fuseGrp, 0.0) + take
-                        for d in sinks:  # les batteries sans PV absorbent (2e passe si `parallel`)
-                            take = min(rem, chg_room(d))
-                            # 1.4.4.4 : placer du solaire n'est pas la répartition ordinaire.
-                            # ⚠️ Le seuil ne vaut que pour RÉVEILLER un appareil. Un puits déjà
-                            # servi au-dessus est commandé : lui ajouter le reliquat ne coûte aucun
-                            # démarrage, et le lui refuser renverrait ces watts AU RÉSEAU. Mesuré
-                            # sur un budget de 100 W partagé en 32/68 : les 32 W de la part refusée
-                            # restaient non placés.
-                            if d.deviceId not in engages and not self._engage_ok(d, take, SOLAR_ENGAGE, now, charge=True):
-                                continue
-                            if take <= 0:
-                                continue
-                            cmd[d] -= take
-                            rem -= take
-                            alloue += take
-                            engages.add(d.deviceId)
-                            fuse_chg[d.fuseGrp] = fuse_chg.get(d.fuseGrp, 0.0) + take
+                        # 1.4.4.4 : placer du solaire n'est pas la répartition ordinaire, d'où
+                        # `SOLAR_ENGAGE` et non `min_engage`. `sinks` ne contient ici QUE des
+                        # batteries sans PV (filtre ci-dessus) : un seul rang, donc le prorata
+                        # de `parallel` s'y applique entre égaux.
+                        alloue = self._repartir_charge(
+                            sinks,
+                            total_charge,
+                            chg_room,
+                            lambda d, t: fuse_chg.__setitem__(d.fuseGrp, fuse_chg.get(d.fuseGrp, 0.0) + t),
+                            cmd,
+                            SOLAR_ENGAGE,
+                            now,
+                        )
+                        rem = total_charge - alloue
                         # ⚠️ Les producteurs ne sortent QUE ce qui a trouvé preneur. Avec
                         # `total_charge` ici, un puits écarté par le seuil d'engagement laissait le
                         # producteur sortir la part quand même : elle ne pouvait aller nulle part et
@@ -1833,37 +1901,26 @@ class FondationEngine:
                 return max(0.0, min(-d.charge_limit + cmd[d], -d.fuseGrp.minpower - used, self._chg_ceiling(d) + cmd[d]))
 
             cstrat = self.charge_strategy.value
-            if cstrat == 3:  # parallel : prorata place (100−SoC)×capacité, reliquat en 2e passe
-                weights = {d: max(1.0, (100 - d.electricLevel.asInt) * d.kWh) for d in cand}
-                total_w = sum(weights.values())
-                share = rem
-                for d in cand:
-                    take = min(share * weights[d] / total_w if total_w > 0 else 0.0, chg_cap(d))
-                    if not self._engage_ok(d, take, me_chg, now, charge=True):
-                        continue
-                    cmd[d] -= take
-                    rem -= take
-                    fuse_used[d.fuseGrp] = fuse_used.get(d.fuseGrp, 0.0) + take
-                for d in cand:
-                    take = min(rem, chg_cap(d))
-                    if not self._engage_ok(d, take, me_chg, now, charge=True):
-                        continue
-                    cmd[d] -= take
-                    rem -= take
-                    fuse_used[d.fuseGrp] = fuse_used.get(d.fuseGrp, 0.0) + take
-            else:
-                if cstrat == 2:  # fixed_order : sans-PV d'abord, puis le plus gros (garde la marge PV)
-                    cand.sort(key=lambda d: (self._has_pv(d), -d.kWh))
-                else:            # hysteresis / hysteresis_wide : sans-PV d'abord, puis plus-vide + sticky
-                    hyst = 15 if cstrat == 1 else self.hyst_device.asNumber
-                    cand.sort(key=lambda d: (self._has_pv(d), d.electricLevel.asInt - (hyst if self.clead.get(d.deviceId) else 0)))
-                for d in cand:
-                    take = min(rem, chg_cap(d))
-                    if not self._engage_ok(d, take, me_chg, now, charge=True):
-                        continue
-                    cmd[d] -= take
-                    rem -= take
-                    fuse_used[d.fuseGrp] = fuse_used.get(d.fuseGrp, 0.0) + take
+            # ⛔ 1.4.5.15 — LE TRI SORTAIT DU `else` : en `parallel` (cstrat == 3) `cand` n'était
+            # PAS TRIÉ DU TOUT. Les producteurs recevaient donc leur part au prorata EN MÊME TEMPS
+            # que les batteries sans PV, au lieu de passer en dernier. Or leur batterie est le seul
+            # débouché de leur PV au-delà de leur limite AC : la remplir tôt leur fait écrêter
+            # leurs propres panneaux ensuite. Le tri est désormais INCONDITIONNEL, et c'est
+            # `_repartir_charge` qui applique le prorata DANS chaque rang.
+            if cstrat == 2:  # fixed_order : sans-PV d'abord, puis le plus gros (garde la marge PV)
+                cand.sort(key=lambda d: (self._has_pv(d), -d.kWh))
+            else:            # hysteresis / hysteresis_wide / parallel : sans-PV d'abord, puis plus-vide + sticky
+                hyst = 15 if cstrat == 1 else self.hyst_device.asNumber
+                cand.sort(key=lambda d: (self._has_pv(d), d.electricLevel.asInt - (hyst if self.clead.get(d.deviceId) else 0)))
+            rem -= self._repartir_charge(
+                cand,
+                rem,
+                chg_cap,
+                lambda d, t: fuse_used.__setitem__(d.fuseGrp, fuse_used.get(d.fuseGrp, 0.0) + t),
+                cmd,
+                me_chg,
+                now,
+            )
 
             # 1bis (CHARGE) : le surplus du bus (export des micro-onduleurs tiers) est absorbé ci-dessus.
             # S'il RESTE de la place dans les batteries sans PV, y router aussi le solaire des producteurs
@@ -2321,7 +2378,8 @@ class FondationEngine:
                 cmd[d] = take
                 out -= take
             rem = total_charge
-            # ⛔ 02/10/2026 — `parallel` N'ÉTAIT IMPLÉMENTÉ QUE DANS L'AUTRE BRANCHE DE CHARGE.
+            # ⛔ ANCIEN COMMENTAIRE DE LA 1.4.5.13, conservé pour l'historique :
+            # `parallel` N'ÉTAIT IMPLÉMENTÉ QUE DANS L'AUTRE BRANCHE DE CHARGE.
             # Ici le remplissage était purement séquentiel : le premier puits prenait tout ce
             # qu'il pouvait, le suivant le reliquat. L'utilisateur avait beau choisir `parallel`,
             # cette branche retombait EN SILENCE sur « le plus vide d'abord » — et comme les deux
@@ -2335,32 +2393,22 @@ class FondationEngine:
             # ⚠️ `chg_cap(d)` est relu à chaque attribution (et non figé) pour que deux puits d'un
             # MÊME fusegroup ne puissent pas se faire doubler leur budget. `pris` borne en plus
             # chaque appareil à sa propre limite de charge sur les DEUX passes.
-            if self.charge_strategy.value == 3 and len(sinks) > 1:
-                poids = {d: max(1.0, (100 - d.electricLevel.asInt) * d.kWh) for d in sinks}
-                total_p = sum(poids.values())
-                budget = rem
-                pris: dict[ZendureDevice, float] = {d: 0.0 for d in sinks}
-                for d in sinks:
-                    part = budget * poids[d] / total_p if total_p > 0 else 0.0
-                    take = max(0.0, min(part, chg_cap(d), -d.charge_limit - pris[d]))
-                    cmd[d] = -take
-                    pris[d] += take
-                    rem -= take
-                    fuse_used[d.fuseGrp] = fuse_used.get(d.fuseGrp, 0.0) + take
-                for d in sinks:  # 2e passe : le reliquat va à ceux qui ont encore de la place
-                    if rem <= 0:
-                        break
-                    take = max(0.0, min(rem, chg_cap(d), -d.charge_limit - pris[d]))
-                    cmd[d] -= take
-                    pris[d] += take
-                    rem -= take
-                    fuse_used[d.fuseGrp] = fuse_used.get(d.fuseGrp, 0.0) + take
-            else:
-                for d in sinks:
-                    take = min(rem, chg_cap(d))
-                    cmd[d] = -take
-                    rem -= take
-                    fuse_used[d.fuseGrp] = fuse_used.get(d.fuseGrp, 0.0) + take
+            # ⛔ 1.4.5.15 — DEUX DÉFAUTS CORRIGÉS ICI, révélés en mettant les trois sites côte à côte :
+            #   1. AUCUN SEUIL DE RÉVEIL. Ce site pouvait démarrer un onduleur pour quelques watts,
+            #      ce que les deux autres interdisent. Il prend désormais `SOLAR_ENGAGE` (60 W,
+            #      le minimum utile mesuré d'un Hyper) : on ne démarre pas un onduleur pour 5 W.
+            #   2. `cmd[d] = -take` ÉCRASAIT la consigne au lieu de l'ajouter. Un appareil à la
+            #      fois producteur et puits — glagla à 99 % l'est — perdait sa consigne de
+            #      production, posée quelques lignes plus haut dans la boucle `full_prod`.
+            rem -= self._repartir_charge(
+                sinks,
+                total_charge,
+                chg_cap,
+                lambda d, t: fuse_used.__setitem__(d.fuseGrp, fuse_used.get(d.fuseGrp, 0.0) + t),
+                cmd,
+                SOLAR_ENGAGE,
+                now,
+            )
         else:
             # DÉFICIT : le producteur sort son solaire PUIS puise dans sa batterie jusqu'à
             # `min_engage`, et seulement au-delà les autres batteries prennent le relais.
