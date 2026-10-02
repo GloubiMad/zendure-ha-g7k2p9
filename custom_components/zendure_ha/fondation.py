@@ -1635,14 +1635,49 @@ class FondationEngine:
                     if total_charge > 0:
                         rem = total_charge
                         alloue = 0.0  # ⚠️ ce qui est RÉELLEMENT parti dans un puits (cf. plus bas)
-                        for d in sinks:  # les batteries sans PV absorbent
+                        # ⛔ 02/10/2026 — CE REMPLISSAGE IGNORAIT LA STRATÉGIE, alors que le TRI
+                        # juste au-dessus la lit. Troisième écriture de la même décision, et la
+                        # seule des trois où `parallel` n'existait pas : le premier puits prenait
+                        # tout, le suivant le reliquat — donc rien.
+                        # ⚠️ C'EST LE SITE QUI COMPTE : le commentaire de la ligne ~1585 le dit,
+                        # le matin le régime est DISCHARGE ~87 % du temps, donc TOUTE la charge du
+                        # parc passe ici. Corriger les deux autres branches (1.4.5.13) n'a donc
+                        # rien changé pour l'utilisateur — mesuré, `up` seul chargeait encore.
+                        # Même formule et même structure qu'à la ligne ~1801 (prorata puis
+                        # reliquat), pour que les trois sites cessent de diverger.
+                        engages: set[str] = set()  # déjà réveillés CE cycle (cf. 2e passe)
+                        if self.charge_strategy.value == 3 and len(sinks) > 1:
+                            poids = {d: max(1.0, (100 - d.electricLevel.asInt) * d.kWh) for d in sinks}
+                            total_p = sum(poids.values())
+                            budget = rem
+                            for d in sinks:
+                                part = budget * poids[d] / total_p if total_p > 0 else 0.0
+                                take = min(part, chg_room(d), rem)
+                                # Une part trop petite est refusée par le seuil d'engagement ; son
+                                # budget n'est pas perdu, la 2e passe le redonne à qui peut le prendre.
+                                if take <= 0 or not self._engage_ok(d, take, SOLAR_ENGAGE, now, charge=True):
+                                    continue
+                                cmd[d] -= take
+                                rem -= take
+                                alloue += take
+                                engages.add(d.deviceId)
+                                fuse_chg[d.fuseGrp] = fuse_chg.get(d.fuseGrp, 0.0) + take
+                        for d in sinks:  # les batteries sans PV absorbent (2e passe si `parallel`)
                             take = min(rem, chg_room(d))
-                            # 1.4.4.4 : placer du solaire n'est pas la répartition ordinaire
-                            if not self._engage_ok(d, take, SOLAR_ENGAGE, now, charge=True):
+                            # 1.4.4.4 : placer du solaire n'est pas la répartition ordinaire.
+                            # ⚠️ Le seuil ne vaut que pour RÉVEILLER un appareil. Un puits déjà
+                            # servi au-dessus est commandé : lui ajouter le reliquat ne coûte aucun
+                            # démarrage, et le lui refuser renverrait ces watts AU RÉSEAU. Mesuré
+                            # sur un budget de 100 W partagé en 32/68 : les 32 W de la part refusée
+                            # restaient non placés.
+                            if d.deviceId not in engages and not self._engage_ok(d, take, SOLAR_ENGAGE, now, charge=True):
+                                continue
+                            if take <= 0:
                                 continue
                             cmd[d] -= take
                             rem -= take
                             alloue += take
+                            engages.add(d.deviceId)
                             fuse_chg[d.fuseGrp] = fuse_chg.get(d.fuseGrp, 0.0) + take
                         # ⚠️ Les producteurs ne sortent QUE ce qui a trouvé preneur. Avec
                         # `total_charge` ici, un puits écarté par le seuil d'engagement laissait le
