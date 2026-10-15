@@ -272,6 +272,7 @@ class FondationEngine:
         # `_direct_control` y arrive sans passer par le calcul, d'où l'initialisation ici.
         self.inflight: float = 0.0
         self.en_vol: bool = False
+        self.int_gel: bool = False  # 1.4.5.16 : intégrale gelée (réveil en attente), lu par le debug
         # Consigne envoyée au device (signée : + décharge / − charge). Lue par simulation.csv et par
         # le watchdog (choix d'une commande de réveil DIFFÉRENTE). Vit ici : c'est le moteur qui commande.
         self.cmd_target: dict[str, int] = {}
@@ -385,6 +386,43 @@ class FondationEngine:
             return False
         self.engage_why.pop(d.deviceId, None)
         return True
+
+    def _reveil_en_attente(self, devices: list[ZendureDevice], now: datetime) -> bool:
+        """Un appareil attend-il son DWELL (le seuil est franchi, le réveil n'est pas encore accordé) ?
+
+        ⭐ 1.4.5.16 — ANTI-WINDUP SUR L'ATTENTE D'ENGAGEMENT (3e jumeau de `sat_dis` et de `en_vol`).
+        `sat_dis` couvre « plus rien à mobiliser », `en_vol` couvre « une consigne est partie et
+        n'est pas encore réalisée ». Il manquait « un réveil est REFUSÉ le temps du dwell » : la
+        consigne n'est pas partie, donc `en_vol` est faux, et la capacité de l'appareil endormi
+        compte comme mobilisable, donc `sat_dis` est faux aussi. L'intégrale accumulait alors
+        pendant les 15 s d'attente un écart qu'aucune commande ne pouvait absorber.
+
+        MESURÉ le 15/10/2026 (simulation.csv, 17:40:35 -> 17:43:30) : P1 = +110..+180 W, maison à
+        330 W, SolarFlow plafonné à 150 W, `up` à 61 % refusé par `seuil` puis `dwell`. L'intégrale
+        monte de -413 à 2800 W en 2 min ; à la fin du dwell la consigne part à 1149, 2148, 2548 W
+        (+1000 W/cycle de slew) pour une maison à 330 W -> export de 2 kW, arrêt, et on recommence
+        (55 bascules de `up` en 55 min, un démarrage à froid de 12 s chacune).
+
+        POURQUOI GELER ICI ET PAS AVANT. Tant que la part proposée est SOUS le seuil (`seuil`),
+        l'intégrale doit continuer de monter : c'est elle qui fait franchir le seuil à la part.
+        Le gel ne commence qu'une fois le seuil franchi (le dwell tourne), donc avec une part déjà
+        >= `min_engage` : le réveil qui suit est de l'ordre du seuil, pas de la plaque.
+
+        Frais seulement : `engage_why` n'est pas effacé quand le besoin disparaît, `engage_since`
+        porte l'instant du dernier appel (`last`). Un besoin plus ancien que ENGAGE_GAP est mort.
+        `wake_grace` = 0 -> pas de dwell -> jamais de gel, comportement d'avant exactement.
+        """
+        wg = self.wake_grace.asNumber
+        if wg <= 0:
+            return False
+        for d in devices:
+            vu = self.engage_since.get(d.deviceId)
+            if vu is None:
+                continue
+            since, last = vu
+            if (now - last).total_seconds() <= ENGAGE_GAP and (now - since).total_seconds() < wg:
+                return True
+        return False
 
     def _repartir_charge(
         self,
@@ -1462,11 +1500,17 @@ class FondationEngine:
             self.idle_regime = None
             self.idle_since = None
 
+        # 1.4.5.16 — pas de MONTÉE de l'intégrale pendant qu'un réveil attend son dwell (cf.
+        # `_reveil_en_attente`). Écrit UNE fois, lu par les DEUX sens : le défaut est symétrique,
+        # un puits refusé le temps du dwell charge l'intégrale de charge de la même façon.
+        # Seule la montée est gelée : la descente sur export reste libre, elle est urgente.
+        attente_reveil = self._reveil_en_attente(devices, now)
+        self.int_gel = attente_reveil
         if self.regime == ManagerState.IDLE:
             if hold <= 0:
                 self.integral = 0.0
         elif self.regime == ManagerState.DISCHARGE:
-            if p1 > db_off and not sat_dis and not (en_vol and inflight > db_on):
+            if p1 > db_off and not sat_dis and not attente_reveil and not (en_vol and inflight > db_on):
                 self.integral = min(self.integral + min(p1, step), imax)
             elif p1 < -db_off:
                 # CORRECTIF « B » ÉTENDU À LA DÉCHARGE (25/07) : sur un export, l'intégrale peut
@@ -1491,7 +1535,7 @@ class FondationEngine:
                 if self.integral > floor:
                     self.integral = max(floor, self.integral - max(imin, min(-p1, imax)))
                     self.integral = max(self.integral, -dis_base)
-        elif p1 < -db_off and not sat_chg and not (en_vol and inflight < -db_on):
+        elif p1 < -db_off and not sat_chg and not attente_reveil and not (en_vol and inflight < -db_on):
             self.integral = min(self.integral + min(-p1, step), imax)
         elif p1 > db_off:
             # CORRECTIF « B » : en CHARGE, l'intégrale peut devenir NÉGATIVE (= « charge moins »).
@@ -2187,7 +2231,7 @@ class FondationEngine:
             f"fondation regime={self.regime.name} hl={int(hl_raw)} forced={int(forced)} T={int(t_raw)}"
             f" ema={int(t_reg)} amt={int(self.amt_ema) if self.amt_ema is not None else 0}"
             f" int={int(self.integral)} sp={setpoint} occ={self.occ:.2f}"
-            f" vol={int(self.inflight)}{'*' if self.en_vol else ''}"
+            f" vol={int(self.inflight)}{'*' if self.en_vol else ''}{' gel' if self.int_gel else ''}"
             # 1.4.4.8 : envois MQTT perdus, par appareil. `pub` n'apparait QUE s'il y en a - meme
             # regle que `cap` plus bas : a 480 000 lignes/jour on n'ajoute pas un champ vide.
             f"{pub}{why}"
