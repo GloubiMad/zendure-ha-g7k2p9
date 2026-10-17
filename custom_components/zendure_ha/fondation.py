@@ -264,6 +264,10 @@ class FondationEngine:
         self.inflight_since: datetime | None = None  # 1.4.4.5 : début de l'épisode « consigne en vol »
         # 1.4.4.6 : par device, (début du besoin d'engagement, dernière fois qu'il a été constaté)
         self.engage_since: dict[str, tuple[datetime, datetime]] = {}
+        # 1.4.5.17 : par (device, sens), dernier instant où `_engage_ok` a REFUSÉ (seuil ou dwell) ou ACCORDÉ un réveil.
+        # Le SENS compte : `_engage_ok` sert aussi au routage du surplus vers les puits (charge) pendant une
+        # DÉCHARGE ; un puits refusé à 40 W ne doit pas faire oublier l'intégrale de décharge.
+        self.engage_refus: dict[tuple[str, bool], datetime] = {}
         # 1.4.5.3 — SONDE : pourquoi un appareil n'a-t-il pas reçu de part ? Rempli à chaque
         # cycle par `_engage_ok` et par la répartition, lu seulement par le message de debug.
         self.engage_why: dict[str, str] = {}
@@ -272,7 +276,7 @@ class FondationEngine:
         # `_direct_control` y arrive sans passer par le calcul, d'où l'initialisation ici.
         self.inflight: float = 0.0
         self.en_vol: bool = False
-        self.int_gel: bool = False  # 1.4.5.16 : intégrale gelée (réveil en attente), lu par le debug
+        self.int_oubli: bool = False  # 1.4.5.17 : intégrale ramenée vers 0 (réveil refusé/en attente), lu par le debug
         # Consigne envoyée au device (signée : + décharge / − charge). Lue par simulation.csv et par
         # le watchdog (choix d'une commande de réveil DIFFÉRENTE). Vit ici : c'est le moteur qui commande.
         self.cmd_target: dict[str, int] = {}
@@ -339,6 +343,7 @@ class FondationEngine:
         if not ((not acc and take >= probe) or take >= (me / 2 if running else me)):
             # 1.4.5.3 : `seuil` = la part proposée est trop petite pour réveiller l'appareil.
             self.engage_why[d.deviceId] = f"seuil({take:.0f}<{me / 2 if running else me:.0f})"
+            self.engage_refus[(d.deviceId, charge)] = now
             return False
         if running:
             self.engage_since.pop(d.deviceId, None)
@@ -383,44 +388,42 @@ class FondationEngine:
         if attente < wg:
             # 1.4.5.3 : `dwell` = le besoin est légitime mais n'a pas encore assez duré.
             self.engage_why[d.deviceId] = f"dwell({attente:.0f}/{wg:.0f}s)"
+            self.engage_refus[(d.deviceId, charge)] = now
             return False
         self.engage_why.pop(d.deviceId, None)
+        self.engage_refus[(d.deviceId, charge)] = now  # le cycle du réveil compte aussi : cf. `_reveil_en_attente`
         return True
 
     def _reveil_en_attente(self, devices: list[ZendureDevice], now: datetime) -> bool:
-        """Un appareil attend-il son DWELL (le seuil est franchi, le réveil n'est pas encore accordé) ?
+        """Un réveil est-il REFUSÉ, en attente, ou vient-il d'être accordé ? (vrai = l'intégrale ne monte pas)
 
-        ⭐ 1.4.5.16 — ANTI-WINDUP SUR L'ATTENTE D'ENGAGEMENT (3e jumeau de `sat_dis` et de `en_vol`).
+        ⭐ 1.4.5.16/.17 — ANTI-WINDUP SUR L'ENGAGEMENT (3e jumeau de `sat_dis` et de `en_vol`).
         `sat_dis` couvre « plus rien à mobiliser », `en_vol` couvre « une consigne est partie et
-        n'est pas encore réalisée ». Il manquait « un réveil est REFUSÉ le temps du dwell » : la
-        consigne n'est pas partie, donc `en_vol` est faux, et la capacité de l'appareil endormi
-        compte comme mobilisable, donc `sat_dis` est faux aussi. L'intégrale accumulait alors
-        pendant les 15 s d'attente un écart qu'aucune commande ne pouvait absorber.
+        n'est pas encore réalisée ». Il manquait « le réveil est REFUSÉ » : aucune consigne n'est
+        partie (`en_vol` faux) et la capacité de l'appareil endormi compte comme mobilisable
+        (`sat_dis` faux). L'intégrale accumulait donc un écart qu'aucune commande ne pouvait absorber.
 
-        MESURÉ le 15/10/2026 (simulation.csv, 17:40:35 -> 17:43:30) : P1 = +110..+180 W, maison à
-        330 W, SolarFlow plafonné à 150 W, `up` à 61 % refusé par `seuil` puis `dwell`. L'intégrale
-        monte de -413 à 2800 W en 2 min ; à la fin du dwell la consigne part à 1149, 2148, 2548 W
-        (+1000 W/cycle de slew) pour une maison à 330 W -> export de 2 kW, arrêt, et on recommence
-        (55 bascules de `up` en 55 min, un démarrage à froid de 12 s chacune).
+        POURQUOI L'INTÉGRALE NE DOIT PAS MONTER, MÊME SOUS LE SEUIL. `hl = P1 + Σ home` contient DÉJÀ
+        le manque : P1 = +110 W, c'est exactement ce que le réveil devra fournir. Lui ajouter une
+        intégrale qui a accumulé ce même P1 pendant le refus, c'est compter deux fois le même manque.
+        MESURÉ le 17/10/2026 (simulation.csv, 13:25-13:46, 15 démarrages de `up`) : consigne médiane
+        282 W pour un manque médian de 114 W (consigne = manque + intégrale : 88+212, 114+223…).
+        `up` sur-livre, P1 exporte 100 à 190 W, le moteur coupe, et on recommence (29 bascules en 45
+        min). La 1.4.5.16 ne gelait que pendant le `dwell` : l'intégrale montait quand même pendant la
+        phase `seuil` (avant l'attente) et dans le cycle du réveil lui-même (dwell écoulé, réveil
+        accordé, gel levé AVANT la répartition). D'où ici : refus par `seuil`, refus par `dwell`, ET le
+        cycle du réveil. Le seuil `min_engage` est une ZONE MORTE voulue : un manque inférieur reste
+        sur le réseau, l'intégrale n'a pas à le défaire en gonflant la part jusqu'au seuil.
 
-        POURQUOI GELER ICI ET PAS AVANT. Tant que la part proposée est SOUS le seuil (`seuil`),
-        l'intégrale doit continuer de monter : c'est elle qui fait franchir le seuil à la part.
-        Le gel ne commence qu'une fois le seuil franchi (le dwell tourne), donc avec une part déjà
-        >= `min_engage` : le réveil qui suit est de l'ordre du seuil, pas de la plaque.
-
-        Frais seulement : `engage_why` n'est pas effacé quand le besoin disparaît, `engage_since`
-        porte l'instant du dernier appel (`last`). Un besoin plus ancien que ENGAGE_GAP est mort.
-        `wake_grace` = 0 -> pas de dwell -> jamais de gel, comportement d'avant exactement.
+        Frais seulement : un refus plus ancien que ENGAGE_GAP est un besoin mort. `wake_grace` = 0
+        -> pas de gel, comportement d'avant exactement.
         """
-        wg = self.wake_grace.asNumber
-        if wg <= 0:
+        if self.wake_grace.asNumber <= 0:
             return False
+        sens = self.regime == ManagerState.CHARGE  # seuls comptent les refus du sens dans lequel on intègre
         for d in devices:
-            vu = self.engage_since.get(d.deviceId)
-            if vu is None:
-                continue
-            since, last = vu
-            if (now - last).total_seconds() <= ENGAGE_GAP and (now - since).total_seconds() < wg:
+            vu = self.engage_refus.get((d.deviceId, sens))
+            if vu is not None and (now - vu).total_seconds() <= ENGAGE_GAP:
                 return True
         return False
 
@@ -1313,8 +1316,30 @@ class FondationEngine:
         self.inflight, self.en_vol = inflight, en_vol
 
         # --- split-EMA : le régime décide sur le LISSÉ, les montants sur le BRUT ---
+        # ⭐ 1.4.5.17 — PENDANT UN VOL, `hl` SE TROMPE DANS LE SENS OPPOSÉ AU VOL : ON NE LE SUIT PAS.
+        # `hl = P1 + Σ home` : P1 est frais (Shelly), `home` arrive ~1 s plus tard (propriété
+        # rapportée par l'appareil). Quand un appareil démarre, P1 voit déjà sa sortie alors que
+        # `home` vaut encore 0 : hl SOUS-estime la maison de toute la puissance qui démarre.
+        # Quand on le coupe, c'est l'inverse : P1 est déjà remonté, `home` rapporte encore l'ancienne
+        # sortie : hl SUR-estime. Le moteur lit le faux creux comme « la maison s'est vidée » et
+        # coupe, puis le faux pic comme « la maison réclame 650 W » et relance : la boucle.
+        # MESURÉ le 17/10/2026 (13:25-13:46) : 7 arrêts de `up` sur 13 portent cette signature
+        # (P1 -104..-191 W, hl 87..378 W alors qu'il valait 330..720 W un cycle plus tôt). Exemple,
+        # 13:29:15 : cmd 298, Home 0, hl 102 (vrai : ~370), `amt` 362 -> 284, consigne 573 -> 274,
+        # `up` coupé ; 13:29:17 : hl 648 (vrai : ~370), `amt` -> 393, on relance.
+        # Le vol n'apprend rien sur la maison : tant qu'il dure (`en_vol`, borné par `wake_grace`),
+        # l'estimation ne peut pas bouger DANS le sens que l'erreur de mesure produit. Un vrai
+        # changement de conso dans l'AUTRE sens passe intact ; dans le même sens il est retardé de
+        # `wake_grace` au plus (jamais plus). Les deux filtres lisent la même valeur : une décision
+        # écrite à un seul endroit.
+        t_obs = t_raw
+        if en_vol and self.amt_ema is not None:
+            if inflight > db_on:      # montée en vol -> hl sous-estimé : on ignore les creux
+                t_obs = max(t_raw, self.amt_ema)
+            elif inflight < -db_on:   # descente en vol -> hl sur-estimé : on ignore les pics
+                t_obs = min(t_raw, self.amt_ema)
         alpha = max(0.05, min(1.0, self.hl_alpha.asNumber / 100.0))
-        self.hl_ema = t_raw if self.hl_ema is None else alpha * t_raw + (1.0 - alpha) * self.hl_ema
+        self.hl_ema = t_obs if self.hl_ema is None else alpha * t_obs + (1.0 - alpha) * self.hl_ema
         t_reg = self.hl_ema
 
         # --- lissage des MONTANTS, avec BYPASS fast-track ---
@@ -1345,9 +1370,9 @@ class FondationEngine:
         # commande en vol en face, donc il passe toujours INTACT.
         a_amt = max(0.05, min(1.0, self.amt_alpha.asNumber / 100.0))
         if a_amt >= 1.0 or (abs(t_raw) > ft and not en_vol):
-            self.amt_ema = t_raw
+            self.amt_ema = t_obs  # = t_raw hors vol ; en vol, `t_obs` (le fast-track est déjà exclu par `not en_vol`)
         else:
-            self.amt_ema = t_raw if self.amt_ema is None else a_amt * t_raw + (1.0 - a_amt) * self.amt_ema
+            self.amt_ema = t_obs if self.amt_ema is None else a_amt * t_obs + (1.0 - a_amt) * self.amt_ema
         t_amt = self.amt_ema
 
         # --- machine à états avec hystérésis + fast-track (brut au-delà de ±ft => immédiat) ---
@@ -1500,17 +1525,30 @@ class FondationEngine:
             self.idle_regime = None
             self.idle_since = None
 
-        # 1.4.5.16 — pas de MONTÉE de l'intégrale pendant qu'un réveil attend son dwell (cf.
-        # `_reveil_en_attente`). Écrit UNE fois, lu par les DEUX sens : le défaut est symétrique,
-        # un puits refusé le temps du dwell charge l'intégrale de charge de la même façon.
-        # Seule la montée est gelée : la descente sur export reste libre, elle est urgente.
+        # 1.4.5.16/.17 — pas de MONTÉE de l'intégrale pendant qu'un réveil est refusé, en attente ou
+        # vient d'être accordé (cf. `_reveil_en_attente`). Écrit UNE fois, lu par les DEUX sens : le
+        # défaut est symétrique, un puits refusé charge l'intégrale de charge de la même façon.
+        # La descente sur export reste libre, elle est urgente ; en plus l'intégrale s'oublie (ci-dessous).
         attente_reveil = self._reveil_en_attente(devices, now)
-        self.int_gel = attente_reveil
+        self.int_oubli = attente_reveil
+        if attente_reveil and self.regime != ManagerState.IDLE:
+            # ⭐ 1.4.5.17 — L'INTÉGRALE S'OUBLIE (elle ne se contente pas de se geler). Un gel pur
+            # laissait en place une intégrale NÉGATIVE héritée de la descente sur export qui a coupé
+            # l'appareil (-57..-111 W mesurés) : la part proposée au réveil retombait sous `min_engage`
+            # et l'appareil ne démarrait plus du tout, import durable. Pendant un refus, l'intégrale n'a
+            # aucun actionneur à corriger : on la ramène vers 0 de `step` par cycle, et le réveil part
+            # de la seule action directe (hl - ce que les autres livrent), sans reliquat.
+            self.integral -= max(-step, min(step, self.integral))
         if self.regime == ManagerState.IDLE:
             if hold <= 0:
                 self.integral = 0.0
         elif self.regime == ManagerState.DISCHARGE:
-            if p1 > db_off and not sat_dis and not attente_reveil and not (en_vol and inflight > db_on):
+            # 1.4.5.17 : `abs(inflight)` et non `inflight > db_on`. Le garde ne couvrait que le vol DANS le
+            # sens de P1 (montée en vol + import). L'autre cas est le cycle qui suit une COUPURE : on vient
+            # de retirer la sortie de l'appareil, P1 rebondit, mais `home` rapporte encore l'ancienne
+            # sortie (vol négatif) : le rebond est la conséquence de l'ordre qu'on vient de donner, pas
+            # une erreur à intégrer. Mesuré le 17/10 à 13:29:17 : +77 W d'intégrale dans ce seul cycle.
+            if p1 > db_off and not sat_dis and not attente_reveil and not (en_vol and abs(inflight) > db_on):
                 self.integral = min(self.integral + min(p1, step), imax)
             elif p1 < -db_off:
                 # CORRECTIF « B » ÉTENDU À LA DÉCHARGE (25/07) : sur un export, l'intégrale peut
@@ -1535,7 +1573,7 @@ class FondationEngine:
                 if self.integral > floor:
                     self.integral = max(floor, self.integral - max(imin, min(-p1, imax)))
                     self.integral = max(self.integral, -dis_base)
-        elif p1 < -db_off and not sat_chg and not attente_reveil and not (en_vol and inflight < -db_on):
+        elif p1 < -db_off and not sat_chg and not attente_reveil and not (en_vol and abs(inflight) > db_on):
             self.integral = min(self.integral + min(-p1, step), imax)
         elif p1 > db_off:
             # CORRECTIF « B » : en CHARGE, l'intégrale peut devenir NÉGATIVE (= « charge moins »).
@@ -2231,7 +2269,7 @@ class FondationEngine:
             f"fondation regime={self.regime.name} hl={int(hl_raw)} forced={int(forced)} T={int(t_raw)}"
             f" ema={int(t_reg)} amt={int(self.amt_ema) if self.amt_ema is not None else 0}"
             f" int={int(self.integral)} sp={setpoint} occ={self.occ:.2f}"
-            f" vol={int(self.inflight)}{'*' if self.en_vol else ''}{' gel' if self.int_gel else ''}"
+            f" vol={int(self.inflight)}{'*' if self.en_vol else ''}{' oubli' if self.int_oubli else ''}"
             # 1.4.4.8 : envois MQTT perdus, par appareil. `pub` n'apparait QUE s'il y en a - meme
             # regle que `cap` plus bas : a 480 000 lignes/jour on n'ajoute pas un champ vide.
             f"{pub}{why}"
